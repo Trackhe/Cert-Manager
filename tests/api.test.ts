@@ -1,5 +1,14 @@
-import { describe, test, expect } from 'bun:test';
-import { handleRequest, database } from '../index';
+import { afterAll, beforeAll, describe, test, expect } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createRootCa, createIntermediateCa } from '../src/ca.js';
+
+let handleRequest: (req: Request) => Promise<Response>;
+let database: Parameters<typeof createRootCa>[0];
+let paths: Parameters<typeof createRootCa>[1];
+let testDir: string;
+let sharedCaId: string | null = null;
 
 function req(method: string, path: string, body?: object): Request {
   const url = new URL(path, 'http://localhost');
@@ -10,6 +19,32 @@ function req(method: string, path: string, body?: object): Request {
   });
 }
 
+beforeAll(async () => {
+  testDir = mkdtempSync(join(tmpdir(), 'cert-manager-test-'));
+  process.env.DATA_DIR = testDir;
+  process.env.DB_PATH = join(testDir, 'test.db');
+  const index = await import('../index');
+  handleRequest = index.handleRequest;
+  database = index.database;
+  paths = index.paths;
+  createRootCa(database, paths, 'shared-test-ca', {
+    name: 'Shared Test CA',
+    commonName: 'Shared Test CA',
+    validityYears: 10,
+    keySize: 2048,
+    hashAlgorithm: 'sha256',
+  });
+  sharedCaId = 'shared-test-ca';
+});
+
+afterAll(() => {
+  try {
+    rmSync(testDir, { recursive: true, force: true });
+  } catch {
+    // ignorieren
+  }
+});
+
 describe('Dashboard', () => {
   test('GET / liefert HTML', async () => {
     const res = await handleRequest(req('GET', '/'));
@@ -18,38 +53,6 @@ describe('Dashboard', () => {
     const text = await res.text();
     expect(text).toContain('Dashboard');
     expect(text).toContain('Zertifikate');
-  });
-});
-
-describe('CA Setup', () => {
-  test('POST /api/ca/setup erstellt Root-CA', async () => {
-    const res = await handleRequest(
-      req('POST', '/api/ca/setup', {
-        name: 'Test CA',
-        commonName: 'Test CA Root',
-        validityYears: 2,
-        keySize: 2048,
-        hashAlgo: 'sha256',
-      })
-    );
-    expect(res.status).toBe(200);
-    const data = (await res.json()) as { ok: boolean; id: string };
-    expect(data.ok).toBe(true);
-    expect(typeof data.id).toBe('string');
-    expect(data.id.length).toBeGreaterThan(0);
-  });
-
-  test('POST /api/ca/setup mit minimalen Angaben nutzt Fallback', async () => {
-    const res = await handleRequest(
-      req('POST', '/api/ca/setup', {
-        commonName: 'Cert Manager CA',
-        name: 'Minimal CA',
-      })
-    );
-    expect(res.status).toBe(200);
-    const data = (await res.json()) as { ok: boolean; id: string };
-    expect(data.ok).toBe(true);
-    expect(data.id).toBeDefined();
   });
 });
 
@@ -71,17 +74,8 @@ describe('CA Cert Download', () => {
 
 describe('Intermediate CA', () => {
   test('POST /api/ca/intermediate erstellt Intermediate und Download', async () => {
-    const parentName = 'Parent for Int ' + Date.now();
-    const setupRes = await handleRequest(
-      req('POST', '/api/ca/setup', {
-        name: parentName,
-        commonName: parentName,
-        validityYears: 5,
-        keySize: 2048,
-      })
-    );
-    expect(setupRes.status).toBe(200);
-    const { id: parentId } = (await setupRes.json()) as { id: string };
+    expect(sharedCaId).not.toBeNull();
+    const parentId = sharedCaId!;
 
     const intRes = await handleRequest(
       req('POST', '/api/ca/intermediate', {
@@ -129,20 +123,8 @@ describe('Intermediate CA', () => {
 
 describe('Full flow: CA -> Leaf Cert -> Download', () => {
   test('CA erstellen, Zertifikat ausstellen, Download', async () => {
-    const name = 'Flow CA ' + Date.now();
-    const setupRes = await handleRequest(
-      req('POST', '/api/ca/setup', {
-        name,
-        commonName: name,
-        validityYears: 1,
-        keySize: 2048,
-        hashAlgo: 'sha256',
-      })
-    );
-    expect(setupRes.status).toBe(200);
-    const setupData = (await setupRes.json()) as { ok: boolean; id: string };
-    expect(setupData.ok).toBe(true);
-    const caId = setupData.id;
+    expect(sharedCaId).not.toBeNull();
+    const caId = sharedCaId!;
 
     const createRes = await handleRequest(
       req('POST', '/api/cert/create', {
@@ -226,6 +208,166 @@ describe('Cert Download', () => {
   });
 });
 
+describe('Cert Delete', () => {
+  test('DELETE /api/cert ohne id liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/cert', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /api/cert?id=abc liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/cert?id=abc', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /api/cert?id=999999 liefert 404', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/cert?id=999999', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test('DELETE /api/cert löscht Leaf-Zertifikat', async () => {
+    expect(sharedCaId).not.toBeNull();
+    const createRes = await handleRequest(
+      req('POST', '/api/cert/create', {
+        issuerId: sharedCaId!,
+        domain: 'delete-test.example.com',
+        validityDays: 365,
+        keySize: 2048,
+        hashAlgo: 'sha256',
+      })
+    );
+    expect(createRes.status).toBe(200);
+    const createData = (await createRes.json()) as { id: number };
+    const certId = createData.id;
+    const delRes = await handleRequest(
+      new Request('http://localhost/api/cert?id=' + certId, { method: 'DELETE' })
+    );
+    expect(delRes.status).toBe(200);
+    const delData = (await delRes.json()) as { ok: boolean };
+    expect(delData.ok).toBe(true);
+    const downloadAfter = await handleRequest(
+      req('GET', '/api/cert/download?id=' + certId)
+    );
+    expect(downloadAfter.status).toBe(404);
+  });
+});
+
+describe('CA Delete', () => {
+  test('DELETE /api/ca ohne id liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/ca', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /api/ca?id=unknown liefert 404', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/ca?id=unknown-ca-xyz', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test('DELETE /api/ca löscht Root-CA inkl. Intermediate und Zertifikate', async () => {
+    const rootId = 'ca-delete-root';
+    const intId = 'int-for-delete';
+    createRootCa(database, paths, rootId, {
+      name: 'CA Delete Root',
+      commonName: 'CA Delete Root',
+      validityYears: 2,
+      keySize: 2048,
+      hashAlgorithm: 'sha256',
+    });
+    createIntermediateCa(database, paths, rootId, intId, {
+      name: 'Int for delete',
+      commonName: 'Int for delete',
+      validityYears: 5,
+      keySize: 2048,
+      hashAlgorithm: 'sha256',
+    });
+    const certRes = await handleRequest(
+      req('POST', '/api/cert/create', {
+        issuerId: intId,
+        domain: 'ca-delete-test.example.com',
+        validityDays: 365,
+        keySize: 2048,
+        hashAlgo: 'sha256',
+      })
+    );
+    expect(certRes.status).toBe(200);
+    const delRes = await handleRequest(
+      new Request('http://localhost/api/ca?id=' + rootId, { method: 'DELETE' })
+    );
+    expect(delRes.status).toBe(200);
+    const delData = (await delRes.json()) as { ok: boolean };
+    expect(delData.ok).toBe(true);
+    const caCertAfter = await handleRequest(req('GET', '/api/ca-cert?id=' + rootId));
+    expect(caCertAfter.status).toBe(404);
+    const intCertAfter = await handleRequest(req('GET', '/api/ca-cert?id=' + intId));
+    expect(intCertAfter.status).toBe(404);
+  });
+});
+
+describe('CA Intermediate Delete', () => {
+  test('DELETE /api/ca/intermediate ohne id liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/ca/intermediate', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /api/ca/intermediate?id=unknown liefert 404', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/ca/intermediate?id=unknown-int-xyz', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test('DELETE /api/ca/intermediate löscht Intermediate-CA und zugehörige Zertifikate', async () => {
+    const rootId = 'ca-int-delete-root';
+    const intId = 'int-to-delete';
+    createRootCa(database, paths, rootId, {
+      name: 'CA Int Delete Root',
+      commonName: 'CA Int Delete Root',
+      validityYears: 2,
+      keySize: 2048,
+      hashAlgorithm: 'sha256',
+    });
+    createIntermediateCa(database, paths, rootId, intId, {
+      name: 'Int to delete',
+      commonName: 'Int to delete',
+      validityYears: 5,
+      keySize: 2048,
+      hashAlgorithm: 'sha256',
+    });
+    const certRes = await handleRequest(
+      req('POST', '/api/cert/create', {
+        issuerId: intId,
+        domain: 'int-delete-test.example.com',
+        validityDays: 365,
+        keySize: 2048,
+        hashAlgo: 'sha256',
+      })
+    );
+    expect(certRes.status).toBe(200);
+    const createData = (await certRes.json()) as { id: number };
+    const delRes = await handleRequest(
+      new Request('http://localhost/api/ca/intermediate?id=' + intId, { method: 'DELETE' })
+    );
+    expect(delRes.status).toBe(200);
+    const delData = (await delRes.json()) as { ok: boolean };
+    expect(delData.ok).toBe(true);
+    const intCertAfter = await handleRequest(req('GET', '/api/ca-cert?id=' + intId));
+    expect(intCertAfter.status).toBe(404);
+    const leafAfter = await handleRequest(req('GET', '/api/cert/download?id=' + createData.id));
+    expect(leafAfter.status).toBe(404);
+  });
+});
+
 describe('CA Activate', () => {
   test('POST /api/ca/activate ohne id liefert 400', async () => {
     const res = await handleRequest(req('POST', '/api/ca/activate', {}));
@@ -296,21 +438,46 @@ describe('ACME HTTP-01 Challenge', () => {
   });
 });
 
+describe('Challenges Delete', () => {
+  test('DELETE /api/challenges ohne id liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/challenges', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /api/challenges?id=abc liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/challenges?id=abc', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /api/challenges?id=999999 liefert 404', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/challenges?id=999999', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test('DELETE /api/challenges löscht Challenge', async () => {
+    const token = 'delete-challenge-' + Date.now();
+    database.prepare('INSERT INTO challenges (token, key_authorization, domain) VALUES (?, ?, ?)').run(token, 'auth', 'example.com');
+    const row = database.prepare('SELECT id FROM challenges WHERE token = ?').get(token) as { id: number };
+    const id = row.id;
+    const delRes = await handleRequest(
+      new Request('http://localhost/api/challenges?id=' + id, { method: 'DELETE' })
+    );
+    expect(delRes.status).toBe(200);
+    const getRes = await handleRequest(req('GET', '/.well-known/acme-challenge/' + token));
+    expect(getRes.status).toBe(404);
+  });
+});
+
 describe('CA Activate Erfolg', () => {
   test('nach Aktivierung liefert GET /api/ca-cert ohne id die aktivierte CA', async () => {
-    const name = 'Activate CA ' + Date.now();
-    const setupRes = await handleRequest(
-      req('POST', '/api/ca/setup', {
-        name,
-        commonName: name,
-        validityYears: 1,
-        keySize: 2048,
-      })
-    );
-    expect(setupRes.status).toBe(200);
-    const { id: caId } = (await setupRes.json()) as { id: string };
-
-    const activateRes = await handleRequest(req('POST', '/api/ca/activate', { id: caId }));
+    expect(sharedCaId).not.toBeNull();
+    const activateRes = await handleRequest(req('POST', '/api/ca/activate', { id: sharedCaId! }));
     expect(activateRes.status).toBe(200);
 
     const certRes = await handleRequest(req('GET', '/api/ca-cert'));
@@ -323,21 +490,10 @@ describe('CA Activate Erfolg', () => {
 
 describe('Leaf-Zertifikat von Intermediate-CA', () => {
   test('Zertifikat kann von Intermediate statt von Root ausgestellt werden', async () => {
-    const parentName = 'Parent IntFlow ' + Date.now();
-    const setupRes = await handleRequest(
-      req('POST', '/api/ca/setup', {
-        name: parentName,
-        commonName: parentName,
-        validityYears: 2,
-        keySize: 2048,
-      })
-    );
-    expect(setupRes.status).toBe(200);
-    const { id: parentId } = (await setupRes.json()) as { id: string };
-
+    expect(sharedCaId).not.toBeNull();
     const intRes = await handleRequest(
       req('POST', '/api/ca/intermediate', {
-        parentCaId: parentId,
+        parentCaId: sharedCaId!,
         name: 'Int for Leaf',
         commonName: 'Int for Leaf CA',
         validityYears: 1,

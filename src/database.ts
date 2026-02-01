@@ -1,10 +1,4 @@
 import { Database } from 'bun:sqlite';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import {
-  CONFIG_KEY_ACTIVE_CA_ID,
-  DEFAULT_CA_NAME_MIGRATION,
-  DEFAULT_COMMON_NAME_ROOT,
-} from './constants.js';
 import type { PathHelpers } from './paths.js';
 
 const SCHEMA_STATEMENTS = [
@@ -87,6 +81,10 @@ const SCHEMA_STATEMENTS = [
     key TEXT PRIMARY KEY,
     value TEXT
   )`,
+  `CREATE TABLE IF NOT EXISTS revoked_certificates (
+    cert_id INTEGER PRIMARY KEY REFERENCES certificates(id),
+    revoked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
 ];
 
 function ensureColumn(
@@ -117,23 +115,8 @@ export function runMigrations(
     database.run(statement);
   }
 
-  const oldKeyPath = `${dataDir}/ca-key.pem`;
-  const oldCertPath = `${dataDir}/ca-cert.pem`;
-  if (existsSync(oldKeyPath) && existsSync(oldCertPath)) {
-    const hasAnyCa = database.prepare('SELECT 1 FROM cas LIMIT 1').get() != null;
-    if (!hasAnyCa) {
-      writeFileSync(paths.caKeyPath('default'), readFileSync(oldKeyPath, 'utf8'));
-      writeFileSync(paths.caCertPath('default'), readFileSync(oldCertPath, 'utf8'));
-      database.prepare(
-        'INSERT OR IGNORE INTO cas (id, name, common_name, created_at) VALUES (?, ?, ?, datetime("now"))'
-      ).run('default', DEFAULT_CA_NAME_MIGRATION, DEFAULT_COMMON_NAME_ROOT);
-      database
-        .prepare(`INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)`)
-        .run(CONFIG_KEY_ACTIVE_CA_ID, 'default');
-    }
-  }
-
   ensureColumn(database, 'certificates', 'not_after', 'DATETIME');
   ensureColumn(database, 'certificates', 'pem', 'TEXT');
+  ensureColumn(database, 'certificates', 'issuer_id', 'TEXT');
   ensureColumn(database, 'cas', 'not_after', 'DATETIME');
 }

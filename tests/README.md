@@ -1,12 +1,11 @@
 # Tests – Überblick
 
-## Was wird aktuell getestet (32 Tests)
+## Was wird aktuell getestet
 
 | Bereich | Tests |
 |--------|--------|
 | **Escape (Unit)** | `htmlEscape`, `attrEscape`, `escapeForScript` – Sonderzeichen, script-Tag |
 | **Dashboard** | GET / liefert HTML mit „Dashboard“ und „Zertifikate“ |
-| **CA Setup** | POST /api/ca/setup erstellt Root-CA (voll + minimal), Antwort mit `id` |
 | **CA Cert Download** | GET /api/ca-cert ohne `id` (aktive CA), mit unbekannter `id` → 404 |
 | **Intermediate CA** | Parent anlegen → Intermediate anlegen → Zertifikat herunterladen; 400 ohne `parentCaId`; 404 bei unbekannter Parent |
 | **Full Flow** | Root-CA → Leaf-Zertifikat (mit SAN) → Download Zertifikat + Schlüssel (PEM-Struktur) |

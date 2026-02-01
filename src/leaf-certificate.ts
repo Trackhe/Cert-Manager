@@ -64,8 +64,8 @@ export function createLeafCertificate(
   const certificatePem = forge.pki.certificateToPem(certificate);
 
   database.prepare(
-    'INSERT INTO certificates (domain, not_after, created_at, pem) VALUES (?, ?, datetime("now"), ?)'
-  ).run(primaryDomain, notAfter, certificatePem);
+    'INSERT INTO certificates (domain, not_after, created_at, pem, issuer_id) VALUES (?, ?, datetime("now"), ?, ?)'
+  ).run(primaryDomain, notAfter, certificatePem, issuerId);
 
   const lastRow = database.prepare('SELECT last_insert_rowid() as id').get() as { id: number };
   const certificateId = lastRow.id;

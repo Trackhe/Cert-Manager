@@ -12,13 +12,15 @@ export interface SummaryData {
     letsEncrypt: { email: string; accountUrl: string } | null;
     caConfigured: boolean;
   };
-  challenges: Array<{ token: string; domain: string; expires_at: string | null }>;
+  challenges: Array<{ id: number; token: string; domain: string; expires_at: string | null }>;
   certificates: Array<{
     id: number;
     domain: string;
     not_after: string | null;
     created_at: string | null;
     has_pem: number;
+    issuer_id: string | null;
+    revoked: number;
   }>;
   cas: Array<{
     id: string;
@@ -56,18 +58,26 @@ export function getSummaryData(
   ).get() as { provider: string; email: string | null; account_url: string | null } | undefined;
 
   const challenges = database.prepare(
-    'SELECT token, domain, expires_at FROM challenges ORDER BY id DESC'
-  ).all() as Array<{ token: string; domain: string; expires_at: string | null }>;
+    'SELECT id, token, domain, expires_at FROM challenges ORDER BY id DESC'
+  ).all() as Array<{ id: number; token: string; domain: string; expires_at: string | null }>;
 
   const certificates = database.prepare(
-    'SELECT id, domain, not_after, created_at, (pem IS NOT NULL) as has_pem FROM certificates ORDER BY id DESC'
+    `SELECT c.id, c.domain, c.not_after, c.created_at, (c.pem IS NOT NULL) as has_pem, c.issuer_id,
+            (SELECT 1 FROM revoked_certificates r WHERE r.cert_id = c.id) AS revoked
+     FROM certificates c ORDER BY c.id DESC`
   ).all() as Array<{
     id: number;
     domain: string;
     not_after: string | null;
     created_at: string | null;
     has_pem: number;
+    issuer_id: string | null;
+    revoked: number | null;
   }>;
+  const certificatesNormalized = certificates.map((c) => ({
+    ...c,
+    revoked: c.revoked != null ? 1 : 0,
+  }));
 
   const timeUtc = now.toISOString().slice(0, 19) + 'Z';
   const timeLocal = now.toLocaleString('de-DE', {
@@ -138,7 +148,7 @@ export function getSummaryData(
       caConfigured,
     },
     challenges,
-    certificates,
+    certificates: certificatesNormalized,
     cas,
     intermediates,
   };

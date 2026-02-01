@@ -1,6 +1,6 @@
 import * as crypto from 'node:crypto';
 import type { Database } from 'bun:sqlite';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import {
   createRootCa,
   createIntermediateCa,
@@ -21,6 +21,38 @@ type ApiContext = {
   request: Request;
   url: URL;
 };
+
+const { X509Certificate } = crypto;
+
+export type CertInfoParsed = {
+  subject: string;
+  issuer: string;
+  serialNumber: string;
+  notBefore: string;
+  notAfter: string;
+  fingerprint256: string;
+  subjectAltName: string | null;
+};
+
+function parseCertInfo(pem: string): CertInfoParsed | null {
+  try {
+    const x = new X509Certificate(pem);
+    const san = typeof (x as unknown as { subjectAltName?: string }).subjectAltName === 'string'
+      ? (x as unknown as { subjectAltName: string }).subjectAltName
+      : null;
+    return {
+      subject: x.subject,
+      issuer: x.issuer,
+      serialNumber: x.serialNumber,
+      notBefore: x.validFrom,
+      notAfter: x.validTo,
+      fingerprint256: x.fingerprint256,
+      subjectAltName: san ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function slugFromName(name: string): string {
   return (
@@ -283,6 +315,206 @@ async function handleCertKey(context: ApiContext): Promise<Response> {
   });
 }
 
+async function handleCertDelete(context: ApiContext): Promise<Response> {
+  const { database, paths, url } = context;
+  const idParameter = url.searchParams.get('id');
+  if (!idParameter) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const certificateId = parseInt(idParameter, 10);
+  if (isNaN(certificateId)) return Response.json({ error: 'Ungültige id' }, { status: 400 });
+  const row = database.prepare('SELECT id FROM certificates WHERE id = ?').get(certificateId);
+  if (!row) return Response.json({ error: 'Zertifikat nicht gefunden' }, { status: 404 });
+  database.prepare('DELETE FROM revoked_certificates WHERE cert_id = ?').run(certificateId);
+  database.prepare('DELETE FROM certificates WHERE id = ?').run(certificateId);
+  const keyPath = paths.leafKeyPath(certificateId);
+  if (existsSync(keyPath)) {
+    try {
+      unlinkSync(keyPath);
+    } catch {
+      // Key-Datei konnte nicht gelöscht werden, DB-Eintrag ist weg
+    }
+  }
+  return Response.json({ ok: true });
+}
+
+async function handleCertRevoke(context: ApiContext): Promise<Response> {
+  const { database, url } = context;
+  const idParam = url.searchParams.get('id');
+  if (!idParam) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const certId = parseInt(idParam, 10);
+  if (isNaN(certId)) return Response.json({ error: 'Ungültige id' }, { status: 400 });
+  const row = database.prepare('SELECT id FROM certificates WHERE id = ?').get(certId);
+  if (!row) return Response.json({ error: 'Zertifikat nicht gefunden' }, { status: 404 });
+  const revoked = database.prepare('SELECT 1 FROM revoked_certificates WHERE cert_id = ?').get(certId);
+  if (revoked) return Response.json({ error: 'Zertifikat ist bereits widerrufen' }, { status: 400 });
+  database.prepare('INSERT INTO revoked_certificates (cert_id) VALUES (?)').run(certId);
+  return Response.json({ ok: true });
+}
+
+async function handleCertRevocationStatus(context: ApiContext): Promise<Response> {
+  const { database, url } = context;
+  const idParam = url.searchParams.get('id');
+  if (!idParam) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const certId = parseInt(idParam, 10);
+  if (isNaN(certId)) return Response.json({ error: 'Ungültige id' }, { status: 400 });
+  const certRow = database.prepare('SELECT id FROM certificates WHERE id = ?').get(certId);
+  if (!certRow) return Response.json({ error: 'Zertifikat nicht gefunden' }, { status: 404 });
+  const revRow = database
+    .prepare('SELECT revoked_at FROM revoked_certificates WHERE cert_id = ?')
+    .get(certId) as { revoked_at: string } | undefined;
+  return Response.json({
+    revoked: !!revRow,
+    revokedAt: revRow?.revoked_at ?? null,
+  });
+}
+
+async function handleCertInfo(context: ApiContext): Promise<Response> {
+  const { database, url } = context;
+  const idParam = url.searchParams.get('id');
+  if (!idParam) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const certId = parseInt(idParam, 10);
+  if (isNaN(certId)) return Response.json({ error: 'Ungültige id' }, { status: 400 });
+  const row = database
+    .prepare('SELECT id, domain, not_after, created_at, pem, issuer_id FROM certificates WHERE id = ?')
+    .get(certId) as
+    | { id: number; domain: string; not_after: string | null; created_at: string | null; pem: string | null; issuer_id: string | null }
+    | undefined;
+  if (!row?.pem) return Response.json({ error: 'Zertifikat nicht gefunden' }, { status: 404 });
+  const parsed = parseCertInfo(row.pem);
+  const info = {
+    type: 'cert' as const,
+    id: row.id,
+    domain: row.domain,
+    notAfter: row.not_after,
+    createdAt: row.created_at,
+    issuerId: row.issuer_id,
+    pem: row.pem,
+    ...(parsed ?? {}),
+  };
+  return Response.json(info);
+}
+
+async function handleCaInfo(context: ApiContext): Promise<Response> {
+  const { database, paths, url } = context;
+  const caId = url.searchParams.get('id');
+  if (!caId) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const rootRow = database
+    .prepare('SELECT id, name, common_name, not_after, created_at FROM cas WHERE id = ?')
+    .get(caId) as
+    | { id: string; name: string; common_name: string; not_after: string | null; created_at: string | null }
+    | undefined;
+  if (rootRow) {
+    const certPath = paths.caCertPath(caId);
+    if (!existsSync(certPath)) return Response.json({ error: 'CA-Zertifikat nicht gefunden' }, { status: 404 });
+    const pem = readFileSync(certPath, 'utf8');
+    const parsed = parseCertInfo(pem);
+    return Response.json({
+      type: 'root' as const,
+      id: rootRow.id,
+      name: rootRow.name,
+      commonName: rootRow.common_name,
+      notAfter: rootRow.not_after,
+      createdAt: rootRow.created_at,
+      pem,
+      ...(parsed ?? {}),
+    });
+  }
+  const intRow = database
+    .prepare('SELECT id, parent_ca_id, name, common_name, not_after, created_at FROM intermediate_cas WHERE id = ?')
+    .get(caId) as
+    | { id: string; parent_ca_id: string; name: string; common_name: string; not_after: string | null; created_at: string | null }
+    | undefined;
+  if (!intRow) return Response.json({ error: 'CA nicht gefunden' }, { status: 404 });
+  const certPath = paths.intermediateCertPath(caId);
+  if (!existsSync(certPath)) return Response.json({ error: 'CA-Zertifikat nicht gefunden' }, { status: 404 });
+  const pem = readFileSync(certPath, 'utf8');
+  const parsed = parseCertInfo(pem);
+  return Response.json({
+    type: 'intermediate' as const,
+    id: intRow.id,
+    parentCaId: intRow.parent_ca_id,
+    name: intRow.name,
+    commonName: intRow.common_name,
+    notAfter: intRow.not_after,
+    createdAt: intRow.created_at,
+    pem,
+    ...(parsed ?? {}),
+  });
+}
+
+function deleteLeafCertsByIssuer(database: Database, paths: PathHelpers, issuerId: string): void {
+  const rows = database.prepare('SELECT id FROM certificates WHERE issuer_id = ?').all(issuerId) as Array<{ id: number }>;
+  for (const row of rows) {
+    database.prepare('DELETE FROM revoked_certificates WHERE cert_id = ?').run(row.id);
+    database.prepare('DELETE FROM certificates WHERE id = ?').run(row.id);
+    const keyPath = paths.leafKeyPath(row.id);
+    if (existsSync(keyPath)) {
+      try {
+        unlinkSync(keyPath);
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+async function handleCaDelete(context: ApiContext): Promise<Response> {
+  const { database, paths, url } = context;
+  const caId = url.searchParams.get('id');
+  if (!caId) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const rootRow = database.prepare('SELECT 1 FROM cas WHERE id = ?').get(caId);
+  if (!rootRow) return Response.json({ error: 'Root-CA nicht gefunden' }, { status: 404 });
+
+  const intermediates = database
+    .prepare('SELECT id FROM intermediate_cas WHERE parent_ca_id = ?')
+    .all(caId) as Array<{ id: string }>;
+  for (const int of intermediates) {
+    deleteLeafCertsByIssuer(database, paths, int.id);
+    const keyPath = paths.intermediateKeyPath(int.id);
+    const certPath = paths.intermediateCertPath(int.id);
+    if (existsSync(keyPath)) try { unlinkSync(keyPath); } catch { /* ignore */ }
+    if (existsSync(certPath)) try { unlinkSync(certPath); } catch { /* ignore */ }
+    database.prepare('DELETE FROM intermediate_cas WHERE id = ?').run(int.id);
+  }
+  deleteLeafCertsByIssuer(database, paths, caId);
+  const rootKeyPath = paths.caKeyPath(caId);
+  const rootCertPath = paths.caCertPath(caId);
+  if (existsSync(rootKeyPath)) try { unlinkSync(rootKeyPath); } catch { /* ignore */ }
+  if (existsSync(rootCertPath)) try { unlinkSync(rootCertPath); } catch { /* ignore */ }
+  database.prepare('DELETE FROM cas WHERE id = ?').run(caId);
+  const activeId = database.prepare(`SELECT value FROM config WHERE key = ?`).get(CONFIG_KEY_ACTIVE_CA_ID) as { value: string } | undefined;
+  if (activeId && activeId.value === caId) {
+    database.prepare('DELETE FROM config WHERE key = ?').run(CONFIG_KEY_ACTIVE_CA_ID);
+  }
+  return Response.json({ ok: true });
+}
+
+async function handleCaIntermediateDelete(context: ApiContext): Promise<Response> {
+  const { database, paths, url } = context;
+  const id = url.searchParams.get('id');
+  if (!id) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const row = database.prepare('SELECT 1 FROM intermediate_cas WHERE id = ?').get(id);
+  if (!row) return Response.json({ error: 'Intermediate-CA nicht gefunden' }, { status: 404 });
+  deleteLeafCertsByIssuer(database, paths, id);
+  const keyPath = paths.intermediateKeyPath(id);
+  const certPath = paths.intermediateCertPath(id);
+  if (existsSync(keyPath)) try { unlinkSync(keyPath); } catch { /* ignore */ }
+  if (existsSync(certPath)) try { unlinkSync(certPath); } catch { /* ignore */ }
+  database.prepare('DELETE FROM intermediate_cas WHERE id = ?').run(id);
+  return Response.json({ ok: true });
+}
+
+async function handleChallengesDelete(context: ApiContext): Promise<Response> {
+  const { database, url } = context;
+  const idParam = url.searchParams.get('id');
+  if (!idParam) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const id = parseInt(idParam, 10);
+  if (isNaN(id)) return Response.json({ error: 'Ungültige id' }, { status: 400 });
+  const row = database.prepare('SELECT 1 FROM challenges WHERE id = ?').get(id);
+  if (!row) return Response.json({ error: 'Challenge nicht gefunden' }, { status: 404 });
+  database.prepare('DELETE FROM challenges WHERE id = ?').run(id);
+  return Response.json({ ok: true });
+}
+
 const API_ROUTES: Array<{
   method: string;
   path: string;
@@ -295,7 +527,15 @@ const API_ROUTES: Array<{
   { method: 'POST', path: '/api/ca/intermediate', handler: handleCaIntermediate },
   { method: 'POST', path: '/api/cert/create', handler: handleCertCreate },
   { method: 'GET', path: '/api/cert/download', handler: handleCertDownload },
+  { method: 'GET', path: '/api/cert/info', handler: handleCertInfo },
   { method: 'GET', path: '/api/cert/key', handler: handleCertKey },
+  { method: 'POST', path: '/api/cert/revoke', handler: handleCertRevoke },
+  { method: 'GET', path: '/api/cert/revocation-status', handler: handleCertRevocationStatus },
+  { method: 'DELETE', path: '/api/cert', handler: handleCertDelete },
+  { method: 'GET', path: '/api/ca/info', handler: handleCaInfo },
+  { method: 'DELETE', path: '/api/ca', handler: handleCaDelete },
+  { method: 'DELETE', path: '/api/ca/intermediate', handler: handleCaIntermediateDelete },
+  { method: 'DELETE', path: '/api/challenges', handler: handleChallengesDelete },
 ];
 
 export async function handleApi(
