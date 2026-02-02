@@ -9,15 +9,24 @@ export function handleAcmeChallenge(
   const token = tokenMatch?.[1];
   if (!token) return null;
 
-  const challengeRow = database
+  let keyAuthorization: string | undefined;
+  const legacyRow = database
     .prepare('SELECT key_authorization FROM challenges WHERE token = ?')
     .get(token) as { key_authorization: string } | undefined;
+  if (legacyRow) keyAuthorization = legacyRow.key_authorization;
 
-  if (!challengeRow) {
+  if (!keyAuthorization) {
+    const caRow = database
+      .prepare('SELECT key_authorization FROM ca_challenges WHERE token = ?')
+      .get(token) as { key_authorization: string } | undefined;
+    if (caRow) keyAuthorization = caRow.key_authorization;
+  }
+
+  if (!keyAuthorization) {
     return new Response('Not found', { status: 404 });
   }
 
-  return new Response(challengeRow.key_authorization, {
+  return new Response(keyAuthorization, {
     headers: { 'Content-Type': 'text/plain' },
   });
 }

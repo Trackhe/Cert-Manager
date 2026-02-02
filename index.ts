@@ -5,6 +5,7 @@ import { createPathHelpers } from './src/paths.js';
 import { createDatabase, runMigrations } from './src/database.js';
 import { createRequestHandler } from './src/server.js';
 import { renderDashboard } from './src/dashboard.js';
+import { startValidationPolling } from './src/acme.js';
 
 const dataDir = getDataDir();
 const dbPath = getDbPath();
@@ -17,6 +18,7 @@ const paths = createPathHelpers(dataDir);
 runMigrations(database, dataDir, paths);
 
 const handleRequest = createRequestHandler(database, paths, port, renderDashboard);
+startValidationPolling(database);
 
 if (import.meta.main) {
   serve({ port, fetch: handleRequest });

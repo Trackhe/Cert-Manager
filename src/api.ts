@@ -367,6 +367,16 @@ async function handleCertRevocationStatus(context: ApiContext): Promise<Response
   });
 }
 
+function firstCertFromChain(chainPem: string): string {
+  const begin = '-----BEGIN CERTIFICATE-----';
+  const end = '-----END CERTIFICATE-----';
+  const start = chainPem.indexOf(begin);
+  if (start === -1) return chainPem;
+  const endIdx = chainPem.indexOf(end, start);
+  if (endIdx === -1) return chainPem;
+  return chainPem.slice(start, endIdx + end.length);
+}
+
 async function handleCertInfo(context: ApiContext): Promise<Response> {
   const { database, url } = context;
   const idParam = url.searchParams.get('id');
@@ -374,12 +384,23 @@ async function handleCertInfo(context: ApiContext): Promise<Response> {
   const certId = parseInt(idParam, 10);
   if (isNaN(certId)) return Response.json({ error: 'Ungültige id' }, { status: 400 });
   const row = database
-    .prepare('SELECT id, domain, not_after, created_at, pem, issuer_id FROM certificates WHERE id = ?')
+    .prepare('SELECT id, domain, not_after, created_at, pem, issuer_id, ca_certificate_id FROM certificates WHERE id = ?')
     .get(certId) as
-    | { id: number; domain: string; not_after: string | null; created_at: string | null; pem: string | null; issuer_id: string | null }
+    | { id: number; domain: string; not_after: string | null; created_at: string | null; pem: string | null; issuer_id: string | null; ca_certificate_id: number | null }
     | undefined;
-  if (!row?.pem) return Response.json({ error: 'Zertifikat nicht gefunden' }, { status: 404 });
-  const parsed = parseCertInfo(row.pem);
+  if (!row) return Response.json({ error: 'Zertifikat nicht gefunden' }, { status: 404 });
+  let pem: string | null = row.pem;
+  if (!pem && row.ca_certificate_id != null) {
+    const chainRow = database
+      .prepare('SELECT pem FROM ca_certificates WHERE id = ?')
+      .get(row.ca_certificate_id) as { pem: string } | undefined;
+    pem = chainRow?.pem ?? null;
+  }
+  if (!pem) return Response.json({ error: 'Zertifikat nicht gefunden' }, { status: 404 });
+  const leafPem = pem.includes('-----BEGIN CERTIFICATE-----') && (pem.match(/-----BEGIN CERTIFICATE-----/g)?.length ?? 0) > 1
+    ? firstCertFromChain(pem)
+    : pem;
+  const parsed = parseCertInfo(leafPem);
   const info = {
     type: 'cert' as const,
     id: row.id,
@@ -387,7 +408,7 @@ async function handleCertInfo(context: ApiContext): Promise<Response> {
     notAfter: row.not_after,
     createdAt: row.created_at,
     issuerId: row.issuer_id,
-    pem: row.pem,
+    pem,
     ...(parsed ?? {}),
   };
   return Response.json(info);
@@ -515,6 +536,28 @@ async function handleChallengesDelete(context: ApiContext): Promise<Response> {
   return Response.json({ ok: true });
 }
 
+async function handleAcmeAuthzDelete(context: ApiContext): Promise<Response> {
+  const { database, url } = context;
+  const authzId = url.searchParams.get('id');
+  if (!authzId) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const row = database.prepare('SELECT 1 FROM ca_authorizations WHERE authz_id = ?').get(authzId);
+  if (!row) return Response.json({ error: 'ACME-Authorisierung nicht gefunden' }, { status: 404 });
+  database.prepare('DELETE FROM ca_challenges WHERE authz_id = ?').run(authzId);
+  database.prepare('DELETE FROM ca_authorizations WHERE authz_id = ?').run(authzId);
+  return Response.json({ ok: true });
+}
+
+async function handleAcmeChallengeAccept(context: ApiContext): Promise<Response> {
+  const { database, url } = context;
+  const authzId = url.searchParams.get('id');
+  if (!authzId) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const row = database.prepare('SELECT 1 FROM ca_authorizations WHERE authz_id = ?').get(authzId);
+  if (!row) return Response.json({ error: 'ACME-Authorisierung nicht gefunden' }, { status: 404 });
+  database.prepare('UPDATE ca_challenges SET status = ? WHERE authz_id = ?').run('valid', authzId);
+  database.prepare('UPDATE ca_authorizations SET status = ? WHERE authz_id = ?').run('valid', authzId);
+  return Response.json({ ok: true });
+}
+
 const API_ROUTES: Array<{
   method: string;
   path: string;
@@ -536,6 +579,8 @@ const API_ROUTES: Array<{
   { method: 'DELETE', path: '/api/ca', handler: handleCaDelete },
   { method: 'DELETE', path: '/api/ca/intermediate', handler: handleCaIntermediateDelete },
   { method: 'DELETE', path: '/api/challenges', handler: handleChallengesDelete },
+  { method: 'DELETE', path: '/api/acme-authz', handler: handleAcmeAuthzDelete },
+  { method: 'POST', path: '/api/acme-challenge/accept', handler: handleAcmeChallengeAccept },
 ];
 
 export async function handleApi(

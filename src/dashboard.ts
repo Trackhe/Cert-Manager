@@ -172,7 +172,7 @@ function renderCertTree(
 }
 
 export function renderDashboard(database: Database, paths: PathHelpers): Response {
-  const { summary, challenges, certificates, cas, intermediates } = getSummaryData(database, paths);
+  const { summary, challenges, acmeChallenges, acmeValidationStatus, certificates, cas, intermediates } = getSummaryData(database, paths);
   const initialData = { cas, intermediates, caConfigured: summary.caConfigured };
   const initialDataJson = escapeForScript(JSON.stringify(initialData));
 
@@ -352,12 +352,21 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; background: var(--gh-canvas-subtle); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--gh-border); }
     h2 { font-size: 16px; font-weight: 600; margin: 24px 0 12px; }
     h2:first-of-type { margin-top: 0; }
+    .acme-validation-cell { vertical-align: middle; min-width: 220px; }
+    .acme-validation-progress { display: inline-flex; align-items: center; gap: 10px; }
+    .acme-validation-circle-wrap { position: relative; width: 40px; height: 40px; flex-shrink: 0; }
+    .acme-validation-circle { width: 40px; height: 40px; transform: rotate(-90deg); }
+    .acme-validation-ring-bg { fill: none; stroke: var(--gh-border); stroke-width: 3; stroke-dasharray: 100 100; }
+    .acme-validation-ring-fill { fill: none; stroke: var(--gh-accent); stroke-width: 3; stroke-dasharray: 100 100; transition: stroke-dashoffset 0.3s ease; }
+    .acme-validation-text { font-weight: 600; font-size: 12px; min-width: 24px; }
+    .acme-validation-countdown { font-variant-numeric: tabular-nums; }
+    .acme-validation-hint { font-size: 12px; color: var(--gh-fg-muted); margin-left: 4px; }
+    .acme-validation-waiting { flex-wrap: wrap; }
   </style>
 </head>
 <body>
   <div id="toast" role="alert" aria-live="assertive"></div>
   <header class="gh-header">
-    <h1>Cert-Manager</h1>
     <button type="button" id="themeToggle" class="btn theme-toggle" title="Dark/Light umschalten" aria-label="Theme umschalten">
       <span class="theme-toggle-icon theme-icon-light" aria-hidden="true">☀</span>
       <span class="theme-toggle-icon theme-icon-dark" aria-hidden="true" style="display:none">☽</span>
@@ -393,11 +402,6 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     <div class="gh-card-header">Setup</div>
     <div class="gh-card-body">
   <div class="setup-grid">
-      <div class="setup-card">
-        <h3>Let's Encrypt Zertifikate</h3>
-        <p>Account anlegen oder verbinden, um Zertifikate von Let's Encrypt per HTTP- oder DNS-Challenge anzufordern.</p>
-        <button type="button" class="btn" onclick="showError('Let\\'s Encrypt Setup – kommt noch')">Einrichten</button>
-      </div>
       <div class="setup-card">
         <h3>Eigene CA</h3>
         <div id="caNotConfigured">
@@ -617,6 +621,45 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
   </div>
 
   <div class="gh-card">
+    <div class="gh-card-header">ACME-Challenges (Certbot / Bestellungen)</div>
+    <div class="gh-card-body">
+  <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Offene Challenges aus ACME-Bestellungen. Der Server liefert die Validierung unter <code>/.well-known/acme-challenge/&lt;Token&gt;</code>.</p>
+  <table>
+    <thead><tr><th>Domain</th><th>Token</th><th>Status</th><th>Validierung</th><th></th></tr></thead>
+    <tbody id="acmeChallenges">${acmeChallenges.length === 0
+      ? '<tr><td colspan="5" class="empty-table">Keine offenen ACME-Challenges</td></tr>'
+      : acmeChallenges
+          .map((ac) => {
+            const val = acmeValidationStatus.find((s) => s.challengeId === ac.challengeId);
+            const validationCell = val
+              ? (() => {
+                  const secs = Math.max(0, Math.ceil((val.nextAttemptAt - Date.now()) / 1000));
+                  const ringOffset = 100 * (1 - Math.min(5, secs) / 5);
+                  return `<span class="acme-validation-progress" data-next-at="${val.nextAttemptAt}">
+  <span class="acme-validation-circle-wrap"><svg class="acme-validation-circle" viewBox="0 0 36 36" aria-hidden="true"><circle class="acme-validation-ring-bg" cx="18" cy="18" r="16"/><circle class="acme-validation-ring-fill" cx="18" cy="18" r="16" style="stroke-dashoffset:${ringOffset}"/></svg></span>
+  <span class="acme-validation-text">Versuch ${val.attemptCount}/${val.maxAttempts}</span>
+  <span>nächster in <span class="acme-validation-countdown" data-next-at="${val.nextAttemptAt}">${secs}</span> s</span>
+</span>`;
+                })()
+              : ac.status === 'pending'
+                ? '<span class="acme-validation-progress acme-validation-waiting"><span class="acme-validation-text">Versuch —/5</span><span class="acme-validation-hint">Warte auf Auslösung (Certbot: Enter)</span></span>'
+                : '—';
+            return `
+      <tr data-authz-id="${attrEscape(ac.authzId)}" data-challenge-id="${attrEscape(ac.challengeId)}">
+        <td>${htmlEscape(ac.domain)}</td>
+        <td><code>${htmlEscape(ac.token)}</code></td>
+        <td>${htmlEscape(ac.status)}</td>
+        <td class="acme-validation-cell">${validationCell}</td>
+        <td><button type="button" class="btn btn-accept-acme btn-accept-acme-authz" data-authz-id="${attrEscape(ac.authzId)}" title="Challenge manuell als gültig markieren">Manuell annehmen</button> <button type="button" class="btn btn-delete btn-delete-acme-authz" data-authz-id="${attrEscape(ac.authzId)}" title="ACME-Challenge löschen">Löschen</button></td>
+      </tr>
+    `;
+          })
+          .join('')}</tbody>
+  </table>
+    </div>
+  </div>
+
+  <div class="gh-card">
     <div class="gh-card-header">Zertifikate</div>
     <div class="gh-card-body">
   <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Hierarchie wie in XCA: Root-CAs, darunter Intermediate-CAs und ausgestellte Zertifikate.</p>
@@ -686,7 +729,46 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       document.getElementById('caConfigured').style.display = configured ? 'block' : 'none';
       if (configured) document.getElementById('caDirectoryUrl').textContent = window.location.origin + '/acme/directory';
     }
+    setInterval(function updateAcmeCountdowns() {
+      document.querySelectorAll('.acme-validation-countdown').forEach(function(span) {
+        var nextAt = parseInt(span.getAttribute('data-next-at'), 10);
+        if (isNaN(nextAt)) return;
+        var secs = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
+        span.textContent = String(secs);
+      });
+      document.querySelectorAll('.acme-validation-progress').forEach(function(wrapper) {
+        var nextAt = parseInt(wrapper.getAttribute('data-next-at'), 10);
+        if (isNaN(nextAt)) return;
+        var secs = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
+        var fill = wrapper.querySelector('.acme-validation-ring-fill');
+        if (fill) fill.style.strokeDashoffset = String(100 * (1 - Math.min(5, secs) / 5));
+      });
+    }, 1000);
     document.body.addEventListener('click', function(e) {
+      var acceptAcmeBtn = e.target.closest && e.target.closest('.btn-accept-acme-authz');
+      if (acceptAcmeBtn) {
+        e.preventDefault();
+        var authzId = acceptAcmeBtn.getAttribute('data-authz-id');
+        if (authzId && confirm('Challenge manuell als gültig markieren? Certbot kann danach mit Enter fortfahren.')) {
+          acceptAcmeBtn.disabled = true;
+          fetch('/api/acme-challenge/accept?id=' + encodeURIComponent(authzId), { method: 'POST' }).then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); }).then(function(r) {
+            if (r.ok) location.reload(); else showError('Fehler: ' + (r.data && r.data.error ? r.data.error : 'Fehlgeschlagen'));
+          }).catch(function(err) { showError(err && err.message ? err.message : 'Fehlgeschlagen'); }).finally(function() { acceptAcmeBtn.disabled = false; });
+        }
+        return;
+      }
+      var delAcmeBtn = e.target.closest && e.target.closest('.btn-delete-acme-authz');
+      if (delAcmeBtn) {
+        e.preventDefault();
+        var authzId = delAcmeBtn.getAttribute('data-authz-id');
+        if (authzId && confirm('ACME-Authorisierung und zugehörige Challenges wirklich löschen?')) {
+          delAcmeBtn.disabled = true;
+          fetch('/api/acme-authz?id=' + encodeURIComponent(authzId), { method: 'DELETE' }).then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); }).then(function(r) {
+            if (r.ok) location.reload(); else showError('Fehler: ' + (r.data && r.data.error ? r.data.error : 'Löschen fehlgeschlagen'));
+          }).catch(function(err) { showError(err && err.message ? err.message : 'Löschen fehlgeschlagen'); }).finally(function() { delAcmeBtn.disabled = false; });
+        }
+        return;
+      }
       var delChBtn = e.target.closest && e.target.closest('.btn-delete-challenge');
       if (delChBtn) {
         e.preventDefault();
@@ -1122,6 +1204,29 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         challengesEl.innerHTML = ch.length === 0
           ? '<tr><td colspan="4" class="empty-table">Keine Einträge</td></tr>'
           : ch.map(function(c) { return '<tr><td><code>' + htmlEscapeClient(c.token) + '</code></td><td>' + htmlEscapeClient(c.domain) + '</td><td>' + (c.expires_at ? new Date(c.expires_at).toLocaleString() : '-') + '</td><td><button type="button" class="btn btn-delete btn-delete-challenge" data-challenge-id="' + c.id + '" title="Challenge löschen">Löschen</button></td></tr>'; }).join('');
+      }
+      var acmeChallengesEl = document.getElementById('acmeChallenges');
+      if (acmeChallengesEl && d.acmeChallenges) {
+        var ach = d.acmeChallenges;
+        var valStatus = d.acmeValidationStatus || [];
+        function attrEscapeClient(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
+        function acmeRow(ac) {
+          var val = valStatus.find(function(s) { return s.challengeId === ac.challengeId; });
+          var validationCell;
+          if (val) {
+            var secs = Math.max(0, Math.ceil((val.nextAttemptAt - Date.now()) / 1000));
+            var ringOffset = 100 * (1 - Math.min(5, secs) / 5);
+            validationCell = '<span class="acme-validation-progress" data-next-at="' + val.nextAttemptAt + '"><span class="acme-validation-circle-wrap"><svg class="acme-validation-circle" viewBox="0 0 36 36" aria-hidden="true"><circle class="acme-validation-ring-bg" cx="18" cy="18" r="16"/><circle class="acme-validation-ring-fill" cx="18" cy="18" r="16" style="stroke-dashoffset:' + ringOffset + '"/></svg></span><span class="acme-validation-text">Versuch ' + val.attemptCount + '/' + val.maxAttempts + '</span><span>nächster in <span class="acme-validation-countdown" data-next-at="' + val.nextAttemptAt + '">' + secs + '</span> s</span></span>';
+          } else if (ac.status === 'pending') {
+            validationCell = '<span class="acme-validation-progress acme-validation-waiting"><span class="acme-validation-text">Versuch —/5</span><span class="acme-validation-hint">Warte auf Auslösung (Certbot: Enter)</span></span>';
+          } else {
+            validationCell = '—';
+          }
+          return '<tr data-authz-id="' + attrEscapeClient(ac.authzId) + '" data-challenge-id="' + attrEscapeClient(ac.challengeId) + '"><td>' + htmlEscapeClient(ac.domain) + '</td><td><code>' + htmlEscapeClient(ac.token) + '</code></td><td>' + htmlEscapeClient(ac.status) + '</td><td class="acme-validation-cell">' + validationCell + '</td><td><button type="button" class="btn btn-accept-acme btn-accept-acme-authz" data-authz-id="' + attrEscapeClient(ac.authzId) + '" title="Challenge manuell als gültig markieren">Manuell annehmen</button> <button type="button" class="btn btn-delete btn-delete-acme-authz" data-authz-id="' + attrEscapeClient(ac.authzId) + '" title="ACME-Challenge löschen">Löschen</button></td></tr>';
+        }
+        acmeChallengesEl.innerHTML = ach.length === 0
+          ? '<tr><td colspan="5" class="empty-table">Keine offenen ACME-Challenges</td></tr>'
+          : ach.map(acmeRow).join('');
       }
     };
   </script>

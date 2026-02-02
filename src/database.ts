@@ -118,5 +118,6 @@ export function runMigrations(
   ensureColumn(database, 'certificates', 'not_after', 'DATETIME');
   ensureColumn(database, 'certificates', 'pem', 'TEXT');
   ensureColumn(database, 'certificates', 'issuer_id', 'TEXT');
+  ensureColumn(database, 'certificates', 'ca_certificate_id', 'INTEGER');
   ensureColumn(database, 'cas', 'not_after', 'DATETIME');
 }

@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
+import { getValidationStatus } from './acme-validation-state.js';
 import { getActiveCaId } from './ca.js';
 import type { PathHelpers } from './paths.js';
 
@@ -13,6 +14,14 @@ export interface SummaryData {
     caConfigured: boolean;
   };
   challenges: Array<{ id: number; token: string; domain: string; expires_at: string | null }>;
+  acmeChallenges: Array<{ challengeId: string; token: string; domain: string; status: string; authzId: string }>;
+  acmeValidationStatus: Array<{
+    challengeId: string;
+    domain: string;
+    attemptCount: number;
+    maxAttempts: number;
+    nextAttemptAt: number;
+  }>;
   certificates: Array<{
     id: number;
     domain: string;
@@ -60,6 +69,18 @@ export function getSummaryData(
   const challenges = database.prepare(
     'SELECT id, token, domain, expires_at FROM challenges ORDER BY id DESC'
   ).all() as Array<{ id: number; token: string; domain: string; expires_at: string | null }>;
+
+  const acmeChallenges = database
+    .prepare(
+      `SELECT c.challenge_id AS challengeId, c.token, a.identifier AS domain, c.status, a.authz_id AS authzId
+       FROM ca_challenges c
+       JOIN ca_authorizations a ON a.authz_id = c.authz_id
+       WHERE a.status = 'pending' OR c.status = 'pending'
+       ORDER BY c.id DESC`
+    )
+    .all() as Array<{ challengeId: string; token: string; domain: string; status: string; authzId: string }>;
+
+  const acmeValidationStatus = getValidationStatus();
 
   const certificates = database.prepare(
     `SELECT c.id, c.domain, c.not_after, c.created_at, (c.pem IS NOT NULL) as has_pem, c.issuer_id,
@@ -148,6 +169,8 @@ export function getSummaryData(
       caConfigured,
     },
     challenges,
+    acmeChallenges,
+    acmeValidationStatus,
     certificates: certificatesNormalized,
     cas,
     intermediates,
