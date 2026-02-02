@@ -111,8 +111,6 @@ function renderCertTree(
       '" data-ca-type="root" title="Root-CA löschen">Löschen</button>';
     const underRoot = intermediates.filter((i) => i.parentCaId === root.id);
     const certsUnderRoot = certificates.filter((c) => c.issuer_id === root.id);
-    const hasChildren = underRoot.length > 0 || certsUnderRoot.length > 0;
-
     const childrenParts: string[] = [];
     for (const int of underRoot) {
       const intValidUntil = int.notAfter ? new Date(int.notAfter).toLocaleString() : '—';
@@ -718,7 +716,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
   <div class="gh-card">
     <div class="gh-card-header">Domains ohne HTTP-Challenge (Whitelist)</div>
     <div class="gh-card-body">
-  <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Domains oder Adressen, für die die ACME HTTP-01-Challenge automatisch als gültig akzeptiert wird. Nützlich im lokalen Netz. Mit <code>*.</code> (z. B. <code>*.trackhe.local</code>) werden alle Subdomains akzeptiert.</p>
+  <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Domains oder Adressen, für die die ACME HTTP-01-Challenge automatisch als gültig akzeptiert wird. Nützlich im lokalen Netz. Mit <code>*.</code> (z. B. <code>*.trackhe.local</code>) werden alle Subdomains akzeptiert.</p>
   <form id="acmeWhitelistForm" class="acme-whitelist-form" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
     <input type="text" id="acmeWhitelistDomain" name="domain" placeholder="z. B. test2.example.com, *.trackhe.local">
     <button type="submit" class="btn">Hinzufügen</button>
@@ -776,11 +774,12 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         updateThemeIcons();
       });
     })();
-    function htmlEscapeClient(s) {
+    function htmlEscape(s) {
       if (s == null) return '';
       var str = String(s);
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
+    function attrEscape(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
     function showError(msg) {
       var el = document.getElementById('toast');
       if (!el) return;
@@ -905,7 +904,6 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     }
     updateCaCard(initialData.caConfigured);
     function buildCertTreeHtml(certs, casList, intList) {
-      function attrEscape(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
       function getIssuerName(issuerId, cas, ints) {
         if (!issuerId) return '—';
         var c = (cas || []).find(function(x) { return x.id === issuerId; });
@@ -925,7 +923,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         var revokeBtn = (isRevoked || isExpired) ? '' : '<button type="button" class="btn btn-revoke" data-cert-id="' + cert.id + '" title="Zertifikat widerrufen">Widerrufen</button> ';
         var renewBtn = (isRevoked || isAcme) ? '' : '<button type="button" class="btn btn-renew" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscape(cert.domain) + '" title="Zertifikat erneuern">Erneuern</button> ';
         var actions = '<button type="button" class="btn btn-view-cert" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscape(cert.domain) + '" data-cert-not-after="' + attrEscape(validUntil) + '" data-cert-created-at="' + attrEscape(createdAt) + '" data-cert-issuer="' + attrEscape(issuerName) + '" title="Details anzeigen">View</button> ' + (cert.has_pem ? '<a href="/api/cert/download?id=' + cert.id + '" class="btn" download>Zertifikat</a> <a href="/api/cert/key?id=' + cert.id + '" class="btn" download>Schlüssel</a> ' : '') + revokeBtn + renewBtn + '<button type="button" class="btn btn-delete" data-cert-id="' + cert.id + '" title="Zertifikat löschen">Löschen</button>';
-        return '<li class="cert-tree__item cert-tree__item--depth-' + depth + (isRevoked ? ' cert-tree__item--revoked' : '') + '"><span class="cert-tree__label">' + htmlEscapeClient(cert.domain) + '</span><span class="cert-tree__meta">' + metaText + '</span><span class="cert-tree__actions">' + actions + '</span></li>';
+        return '<li class="cert-tree__item cert-tree__item--depth-' + depth + (isRevoked ? ' cert-tree__item--revoked' : '') + '"><span class="cert-tree__label">' + htmlEscape(cert.domain) + '</span><span class="cert-tree__meta">' + metaText + '</span><span class="cert-tree__actions">' + actions + '</span></li>';
       }
       function togglerRow(depth, label, meta, actions) {
         return '<div class="cert-tree__item cert-tree__item--depth-' + depth + ' cert-tree__toggler" role="button" tabindex="0" aria-expanded="true"><span class="cert-tree__toggle" aria-hidden="true">▼</span><span class="cert-tree__label">' + label + '</span><span class="cert-tree__meta">' + meta + '</span><span class="cert-tree__actions">' + actions + '</span></div>';
@@ -942,10 +940,10 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           var intValidUntil = int.notAfter ? new Date(int.notAfter).toLocaleString() : '—';
           var intActions = '<button type="button" class="btn btn-view-cert btn-view-ca" data-ca-id="' + attrEscape(int.id) + '" data-ca-type="intermediate" title="Details anzeigen">View</button> <a href="/api/ca-cert?id=' + encodeURIComponent(int.id) + '" class="btn" download>Zertifikat</a> <button type="button" class="btn btn-delete btn-delete-ca" data-ca-id="' + attrEscape(int.id) + '" data-ca-type="intermediate" title="Intermediate-CA löschen">Löschen</button>';
           var intChildRows = certs.filter(function(c) { return c.issuer_id === int.id; }).map(function(c) { return certRow(c, 2); }).join('');
-          childParts.push('<li class="cert-tree__branch" data-branch-id="int-' + attrEscape(int.id) + '">' + togglerRow(1, htmlEscapeClient(int.name) + ' <span class="cert-tree__meta">(Intermediate CA)</span>', 'Gültig bis ' + intValidUntil, intActions) + '<ul class="cert-tree__children">' + intChildRows + '</ul></li>');
+          childParts.push('<li class="cert-tree__branch" data-branch-id="int-' + attrEscape(int.id) + '">' + togglerRow(1, htmlEscape(int.name) + ' <span class="cert-tree__meta">(Intermediate CA)</span>', 'Gültig bis ' + intValidUntil, intActions) + '<ul class="cert-tree__children">' + intChildRows + '</ul></li>');
         });
         certs.filter(function(c) { return c.issuer_id === root.id; }).forEach(function(c) { childParts.push(certRow(c, 1)); });
-        parts.push('<li class="cert-tree__branch" data-branch-id="' + attrEscape(root.id) + '">' + togglerRow(0, htmlEscapeClient(root.name) + ' <span class="cert-tree__meta">(Root-CA)</span>', (root.isActive ? 'Aktiv · ' : '') + 'Gültig bis ' + rootValidUntil, rootActions) + '<ul class="cert-tree__children">' + childParts.join('') + '</ul></li>');
+        parts.push('<li class="cert-tree__branch" data-branch-id="' + attrEscape(root.id) + '">' + togglerRow(0, htmlEscape(root.name) + ' <span class="cert-tree__meta">(Root-CA)</span>', (root.isActive ? 'Aktiv · ' : '') + 'Gültig bis ' + rootValidUntil, rootActions) + '<ul class="cert-tree__children">' + childParts.join('') + '</ul></li>');
       });
       var certsNoIssuer = certs.filter(function(c) { return !c.issuer_id; });
       if (certsNoIssuer.length > 0) {
@@ -1349,13 +1347,12 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         var ch = d.challenges || [];
         challengesEl.innerHTML = ch.length === 0
           ? '<tr><td colspan="4" class="empty-table">Keine Einträge</td></tr>'
-          : ch.map(function(c) { return '<tr><td><code>' + htmlEscapeClient(c.token) + '</code></td><td>' + htmlEscapeClient(c.domain) + '</td><td>' + (c.expires_at ? new Date(c.expires_at).toLocaleString() : '-') + '</td><td><button type="button" class="btn btn-delete btn-delete-challenge" data-challenge-id="' + c.id + '" title="Challenge löschen">Löschen</button></td></tr>'; }).join('');
+          : ch.map(function(c) { return '<tr><td><code>' + htmlEscape(c.token) + '</code></td><td>' + htmlEscape(c.domain) + '</td><td>' + (c.expires_at ? new Date(c.expires_at).toLocaleString() : '-') + '</td><td><button type="button" class="btn btn-delete btn-delete-challenge" data-challenge-id="' + c.id + '" title="Challenge löschen">Löschen</button></td></tr>'; }).join('');
       }
       var acmeChallengesEl = document.getElementById('acmeChallenges');
       if (acmeChallengesEl && d.acmeChallenges) {
         var ach = d.acmeChallenges;
         var valStatus = d.acmeValidationStatus || [];
-        function attrEscapeClient(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
         function acmeRow(ac) {
           var val = valStatus.find(function(s) { return s.challengeId === ac.challengeId; });
           var validationCell;
@@ -1375,8 +1372,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           } else {
             validationCell = '—';
           }
-          var acceptBtn = ac.status !== 'valid' ? '<button type="button" class="btn btn-accept-acme btn-accept-acme-authz" data-authz-id="' + attrEscapeClient(ac.authzId) + '" title="Challenge manuell als gültig markieren">Manuell annehmen</button> ' : '';
-          return '<tr data-authz-id="' + attrEscapeClient(ac.authzId) + '" data-challenge-id="' + attrEscapeClient(ac.challengeId) + '"><td>' + htmlEscapeClient(ac.domain) + '</td><td><code>' + htmlEscapeClient(ac.token) + '</code></td><td>' + htmlEscapeClient(displayStatus) + '</td><td class="acme-validation-cell">' + validationCell + '</td><td>' + acceptBtn + '<button type="button" class="btn btn-delete btn-delete-acme-authz" data-authz-id="' + attrEscapeClient(ac.authzId) + '" title="ACME-Challenge löschen">Löschen</button></td></tr>';
+          var acceptBtn = ac.status !== 'valid' ? '<button type="button" class="btn btn-accept-acme btn-accept-acme-authz" data-authz-id="' + attrEscape(ac.authzId) + '" title="Challenge manuell als gültig markieren">Manuell annehmen</button> ' : '';
+          return '<tr data-authz-id="' + attrEscape(ac.authzId) + '" data-challenge-id="' + attrEscape(ac.challengeId) + '"><td>' + htmlEscape(ac.domain) + '</td><td><code>' + htmlEscape(ac.token) + '</code></td><td>' + htmlEscape(displayStatus) + '</td><td class="acme-validation-cell">' + validationCell + '</td><td>' + acceptBtn + '<button type="button" class="btn btn-delete btn-delete-acme-authz" data-authz-id="' + attrEscape(ac.authzId) + '" title="ACME-Challenge löschen">Löschen</button></td></tr>';
         }
         acmeChallengesEl.innerHTML = ach.length === 0
           ? '<tr><td colspan="5" class="empty-table">Keine offenen ACME-Challenges</td></tr>'
@@ -1385,10 +1382,9 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       var acmeWhitelistEl = document.getElementById('acmeWhitelistDomains');
       if (acmeWhitelistEl && d.acmeWhitelistDomains) {
         var wl = d.acmeWhitelistDomains;
-        function attrEsc(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
         acmeWhitelistEl.innerHTML = wl.length === 0
           ? '<tr><td colspan="2" class="empty-table">Keine Einträge</td></tr>'
-          : wl.map(function(w) { return '<tr data-whitelist-id="' + attrEsc(String(w.id)) + '"><td><code>' + (w.domain || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</code></td><td><button type="button" class="btn btn-delete btn-delete-acme-whitelist" data-id="' + attrEsc(String(w.id)) + '" title="Aus Whitelist löschen">Löschen</button></td></tr>'; }).join('');
+          : wl.map(function(w) { return '<tr data-whitelist-id="' + attrEscape(String(w.id)) + '"><td><code>' + htmlEscape(w.domain || '') + '</code></td><td><button type="button" class="btn btn-delete btn-delete-acme-whitelist" data-id="' + attrEscape(String(w.id)) + '" title="Aus Whitelist löschen">Löschen</button></td></tr>'; }).join('');
       }
     };
   </script>

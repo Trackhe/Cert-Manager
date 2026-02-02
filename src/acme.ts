@@ -1,5 +1,14 @@
 import * as crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { Database } from 'bun:sqlite';
+import {
+  BasicConstraintsExtension,
+  KeyUsageFlags,
+  KeyUsagesExtension,
+  Pkcs10CertificateRequest,
+  X509Certificate,
+  X509CertificateGenerator,
+} from '@peculiar/x509';
 // @ts-expect-error no types
 import * as forge from 'node-forge';
 import {
@@ -14,9 +23,94 @@ import { getActiveCaId, getCa, getSignerCa } from './ca.js';
 import { logger } from './logger.js';
 import type { PathHelpers } from './paths.js';
 
-function base64UrlEncode(buffer: string | Buffer): string {
-  const data = typeof buffer === 'string' ? Buffer.from(buffer, 'utf8') : Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-  return data.toString('base64url');
+const webCrypto = globalThis.crypto;
+
+/** Signaturalgorithmus für X509CertificateGenerator (RSA oder ECDSA). */
+type SigningAlgorithm = { name: 'RSASSA-PKCS1-v1_5'; hash: 'SHA-256' } | { name: 'ECDSA'; hash: 'SHA-256'; namedCurve?: string };
+
+/**
+ * Lädt einen PEM-Private-Key und gibt ein WebCrypto CryptoKey zurück.
+ */
+async function importPrivateKeyPemAsCryptoKey(pem: string): Promise<{ key: CryptoKey; signingAlgorithm: SigningAlgorithm }> {
+  const keyObj = crypto.createPrivateKey(pem);
+  const pkcs8 = keyObj.export({ type: 'pkcs8', format: 'der' }) as Buffer;
+  const keyData = new Uint8Array(pkcs8).buffer;
+  const keyType = keyObj.asymmetricKeyType;
+  if (keyType === 'rsa') {
+    const key = await webCrypto.subtle.importKey(
+      'pkcs8',
+      keyData,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    return { key, signingAlgorithm: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' } };
+  }
+  if (keyType === 'ec') {
+    const jwk = keyObj.export({ format: 'jwk' }) as { crv?: string };
+    const namedCurve = jwk.crv ?? 'P-256';
+    const key = await webCrypto.subtle.importKey(
+      'pkcs8',
+      keyData,
+      { name: 'ECDSA', namedCurve },
+      false,
+      ['sign']
+    );
+    return { key, signingAlgorithm: { name: 'ECDSA', hash: 'SHA-256' } };
+  }
+  throw new Error('Unsupported CA key type: ' + String(keyType));
+}
+
+/**
+ * Signiert einen ECDSA-CSR mit der CA über @peculiar/x509.
+ * Gibt leafPem und notAfter zurück oder null bei Fehler.
+ */
+async function signEcdsaCsrWithX509(
+  csrPem: string,
+  signerCertPath: string,
+  signerKeyPath: string
+): Promise<{ leafPem: string; notAfter: string } | null> {
+  try {
+    const pkcs10 = new Pkcs10CertificateRequest(csrPem);
+    const ok = await pkcs10.verify(webCrypto);
+    if (!ok) return null;
+
+    const signerCertPem = readFileSync(signerCertPath, 'utf8');
+    const signerKeyPem = readFileSync(signerKeyPath, 'utf8');
+    const issuerCert = new X509Certificate(signerCertPem);
+    const issuer = issuerCert.subject;
+    const subject = pkcs10.subject;
+    const publicKey = await pkcs10.publicKey.export(webCrypto);
+    const { key: signingKey, signingAlgorithm } = await importPrivateKeyPemAsCryptoKey(signerKeyPem);
+
+    const notBefore = new Date();
+    const notAfter = new Date();
+    notAfter.setFullYear(notAfter.getFullYear() + 1);
+
+    const cert = await X509CertificateGenerator.create(
+      {
+        serialNumber: BigInt(Date.now()).toString(16),
+        notBefore,
+        notAfter,
+        subject,
+        issuer,
+        publicKey,
+        signingKey,
+        signingAlgorithm,
+        extensions: [
+          new BasicConstraintsExtension(false, 0, true),
+          new KeyUsagesExtension(KeyUsageFlags.digitalSignature | KeyUsageFlags.keyAgreement, true),
+        ],
+      },
+      webCrypto
+    );
+    const leafPem = cert.toString('pem');
+    const notAfterIso = notAfter.toISOString();
+    return { leafPem, notAfter: notAfterIso };
+  } catch (err) {
+    logger.debug('acme finalize ECDSA x509 sign failed', { error: String(err) });
+    return null;
+  }
 }
 
 function base64UrlDecode(value: string): string {
@@ -471,35 +565,6 @@ export async function handleAcme(
           return Response.json({ type: 'urn:ietf:params:acme:error:badCSR', detail: 'Invalid CSR encoding' }, { status: 400 });
         }
         const csrPem = '-----BEGIN CERTIFICATE REQUEST-----\n' + base64Lines.join('\n') + '\n-----END CERTIFICATE REQUEST-----';
-        let csr: forge.pki.CertificationRequest;
-        try {
-          csr = forge.pki.certificationRequestFromPem(csrPem);
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          logger.debug('acme finalize CSR parse failed', { error: msg });
-          if (msg.includes('not RSA') || msg.includes('OID is not RSA')) {
-            return Response.json(
-              {
-                type: 'urn:ietf:params:acme:error:badCSR',
-                detail: 'This CA only supports RSA keys. Use certbot with --key-type rsa (e.g. certbot certonly --manual ... --key-type rsa).',
-              },
-              { status: 400 }
-            );
-          }
-          return Response.json({ type: 'urn:ietf:params:acme:error:badCSR', detail: 'Invalid CSR' }, { status: 400 });
-        }
-        if (!csr.verify()) {
-          return Response.json({ type: 'urn:ietf:params:acme:error:badCSR' }, { status: 400 });
-        }
-
-        const certificate = forge.pki.createCertificate();
-        certificate.publicKey = csr.publicKey;
-        certificate.serialNumber = String(Date.now());
-        certificate.validity.notBefore = new Date();
-        certificate.validity.notAfter = new Date();
-        certificate.validity.notAfter.setFullYear(certificate.validity.notAfter.getFullYear() + 1);
-        certificate.setSubject(csr.subject.attributes);
-
         const rootCa = getCa(database, paths);
         if (!rootCa) {
           return Response.json({ type: 'urn:ietf:params:acme:error:serverInternal' }, { status: 503 });
@@ -508,14 +573,59 @@ export async function handleAcme(
         const firstIntermediate = activeCaId
           ? (database.prepare('SELECT id FROM intermediate_cas WHERE parent_ca_id = ? LIMIT 1').get(activeCaId) as { id: string } | undefined)
           : undefined;
-        const signer = firstIntermediate
-          ? getSignerCa(database, paths, firstIntermediate.id)
-          : rootCa;
-        certificate.setIssuer(signer.cert.subject.attributes);
-        certificate.sign(signer.key, forge.md.sha256.create());
 
-        const leafPem = forge.pki.certificateToPem(certificate);
-        const intermediatePem = firstIntermediate ? forge.pki.certificateToPem(signer.cert) : '';
+        let leafPem: string;
+        let notAfter: string;
+
+        try {
+          const csr = forge.pki.certificationRequestFromPem(csrPem);
+          if (!csr.verify()) {
+            return Response.json({ type: 'urn:ietf:params:acme:error:badCSR' }, { status: 400 });
+          }
+          const certificate = forge.pki.createCertificate();
+          certificate.publicKey = csr.publicKey;
+          certificate.serialNumber = String(Date.now());
+          certificate.validity.notBefore = new Date();
+          certificate.validity.notAfter = new Date();
+          certificate.validity.notAfter.setFullYear(certificate.validity.notAfter.getFullYear() + 1);
+          certificate.setSubject(csr.subject.attributes);
+          const signer = firstIntermediate
+            ? getSignerCa(database, paths, firstIntermediate.id)
+            : rootCa;
+          certificate.setIssuer(signer.cert.subject.attributes);
+          certificate.sign(signer.key, forge.md.sha256.create());
+          leafPem = forge.pki.certificateToPem(certificate);
+          notAfter = certificate.validity.notAfter.toISOString();
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!msg.includes('not RSA') && !msg.includes('OID is not RSA')) {
+            logger.debug('acme finalize CSR parse failed', { error: msg });
+            return Response.json({ type: 'urn:ietf:params:acme:error:badCSR', detail: 'Invalid CSR' }, { status: 400 });
+          }
+          const signerKeyPath = firstIntermediate
+            ? paths.intermediateKeyPath(firstIntermediate.id)
+            : paths.caKeyPath(activeCaId!);
+          const signerCertPath = firstIntermediate
+            ? paths.intermediateCertPath(firstIntermediate.id)
+            : paths.caCertPath(activeCaId!);
+          const x509Result = await signEcdsaCsrWithX509(csrPem, signerCertPath, signerKeyPath);
+          if (!x509Result) {
+            logger.debug('acme finalize ECDSA x509 sign failed');
+            return Response.json(
+              {
+                type: 'urn:ietf:params:acme:error:serverInternal',
+                detail: 'ECDSA-CSR konnte nicht signiert werden.',
+              },
+              { status: 503 }
+            );
+          }
+          leafPem = x509Result.leafPem;
+          notAfter = x509Result.notAfter;
+        }
+
+        const intermediatePem = firstIntermediate
+          ? readFileSync(paths.intermediateCertPath(firstIntermediate.id), 'utf8')
+          : '';
         const rootPem = forge.pki.certificateToPem(rootCa.cert);
         const chainPem = firstIntermediate ? `${leafPem}${intermediatePem}${rootPem}` : `${leafPem}${rootPem}`;
         const insertResult = database.prepare('INSERT INTO ca_certificates (order_id, pem) VALUES (?, ?)').run(orderId, chainPem);
@@ -525,7 +635,6 @@ export async function handleAcme(
         database.prepare('DELETE FROM ca_authorizations WHERE order_id = ?').run(orderId);
 
         const domainList = JSON.parse(orderRow.identifiers) as Array<{ value: string }>;
-        const notAfter = certificate.validity.notAfter.toISOString();
         const issuerIdForCert = firstIntermediate ? firstIntermediate.id : activeCaId ?? null;
         for (const domainEntry of domainList) {
           database.prepare('INSERT INTO certificates (domain, not_after, issuer_id, ca_certificate_id) VALUES (?, ?, ?, ?)').run(

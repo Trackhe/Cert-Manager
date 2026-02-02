@@ -113,8 +113,8 @@ export function createDatabase(dbPath: string): Database {
 
 export function runMigrations(
   database: Database,
-  dataDir: string,
-  paths: PathHelpers
+  _dataDir: string,
+  _paths: PathHelpers
 ): void {
   for (const statement of SCHEMA_STATEMENTS) {
     database.run(statement);

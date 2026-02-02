@@ -79,7 +79,6 @@ export function getValidationStatus(): Array<{
   maxAttempts: number;
   nextAttemptAt: number;
 }> {
-  const now = Date.now();
   return Array.from(validationState.entries()).map(([challengeId, v]) => ({
     challengeId,
     domain: v.domain,
