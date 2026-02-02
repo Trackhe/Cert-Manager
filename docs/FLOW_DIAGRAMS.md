@@ -102,7 +102,7 @@ flowchart LR
 flowchart TB
   A[POST /api/ca/setup] --> B[ca.createRootCa]
   B --> C[Forge: RSA-Keypair]
-  C --> D[Zertifikat (self-signed)]
+  C --> D["Zertifikat (self-signed)"]
   D --> E[Schreiben: Key + Cert]
   E --> F[DB: cas]
   F --> G[Falls keine aktive CA: active_ca_id setzen]
