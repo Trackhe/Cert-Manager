@@ -46,6 +46,32 @@ export function isValidating(challengeId: string): boolean {
   return validationState.has(challengeId);
 }
 
+const FAILED_CHALLENGE_COOLDOWN_MS = 20000;
+const failedChallengeDomains = new Map<string, number>();
+
+export const ACME_FAILED_CHALLENGE_COOLDOWN_MS = FAILED_CHALLENGE_COOLDOWN_MS;
+
+export function recordChallengeFailed(domain: string): void {
+  failedChallengeDomains.set(domain, Date.now());
+}
+
+export function getCooldownRemainingMs(domain: string): number {
+  const now = Date.now();
+  for (const [d, failedAt] of failedChallengeDomains.entries()) {
+    if (now - failedAt >= FAILED_CHALLENGE_COOLDOWN_MS) {
+      failedChallengeDomains.delete(d);
+    }
+  }
+  const failedAt = failedChallengeDomains.get(domain);
+  if (failedAt == null) return 0;
+  const elapsed = now - failedAt;
+  if (elapsed >= FAILED_CHALLENGE_COOLDOWN_MS) {
+    failedChallengeDomains.delete(domain);
+    return 0;
+  }
+  return FAILED_CHALLENGE_COOLDOWN_MS - elapsed;
+}
+
 export function getValidationStatus(): Array<{
   challengeId: string;
   domain: string;

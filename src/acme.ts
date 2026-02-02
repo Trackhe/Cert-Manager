@@ -4,7 +4,9 @@ import type { Database } from 'bun:sqlite';
 import * as forge from 'node-forge';
 import {
   clearValidating,
+  getCooldownRemainingMs,
   isValidating,
+  recordChallengeFailed,
   setValidating,
   updateValidationAttempt,
 } from './acme-validation-state.js';
@@ -92,8 +94,28 @@ export async function runChallengeValidation(
     .prepare('SELECT identifier FROM ca_authorizations WHERE authz_id = ?')
     .get(challengeRow.authz_id) as { identifier: string };
   const domain = authorizationRow.identifier;
-  const challengePath = `/.well-known/acme-challenge/${challengeRow.token}`;
 
+  const whitelistRows = database
+    .prepare('SELECT domain FROM acme_whitelist_domains')
+    .all() as Array<{ domain: string }>;
+  const isWhitelisted = whitelistRows.some((row) => {
+    const w = row.domain;
+    if (domain === w) return true;
+    if (w.startsWith('*.')) {
+      const suffix = w.slice(2);
+      return domain === suffix || domain.endsWith('.' + suffix);
+    }
+    return false;
+  });
+  if (isWhitelisted) {
+    logger.debug('acme challenge whitelisted', { domain });
+    const acceptedAt = Math.floor(Date.now() / 1000);
+    database.prepare('UPDATE ca_challenges SET status = ?, accepted_at = ? WHERE challenge_id = ?').run('valid', acceptedAt, challengeId);
+    database.prepare('UPDATE ca_authorizations SET status = ? WHERE authz_id = ?').run('valid', challengeRow.authz_id);
+    return true;
+  }
+
+  const challengePath = `/.well-known/acme-challenge/${challengeRow.token}`;
   setValidating(challengeId, domain);
 
   for (let attempt = 1; attempt <= VALIDATION_MAX_ATTEMPTS; attempt++) {
@@ -120,12 +142,24 @@ export async function runChallengeValidation(
     }
     logger.debug('acme challenge valid', { domain, attempt });
     updateValidationAttempt(challengeId, attempt, true);
-    database.prepare('UPDATE ca_challenges SET status = ? WHERE challenge_id = ?').run('valid', challengeId);
+    const acceptedAt = Math.floor(Date.now() / 1000);
+    database.prepare('UPDATE ca_challenges SET status = ?, accepted_at = ? WHERE challenge_id = ?').run('valid', acceptedAt, challengeId);
     database.prepare('UPDATE ca_authorizations SET status = ? WHERE authz_id = ?').run('valid', challengeRow.authz_id);
     return true;
   }
 
+  const currentStatus = database
+    .prepare('SELECT status FROM ca_challenges WHERE challenge_id = ?')
+    .get(challengeId) as { status: string } | undefined;
+  if (currentStatus?.status === 'valid') {
+    clearValidating(challengeId);
+    logger.debug('acme challenge already valid (e.g. manual accept), skip overwrite', { domain });
+    return true;
+  }
   clearValidating(challengeId);
+  recordChallengeFailed(domain);
+  database.prepare('UPDATE ca_challenges SET status = ? WHERE challenge_id = ?').run('invalid', challengeId);
+  database.prepare('UPDATE ca_authorizations SET status = ? WHERE authz_id = ?').run('invalid', challengeRow.authz_id);
   logger.debug('acme challenge failed after all attempts', { domain, maxAttempts: VALIDATION_MAX_ATTEMPTS });
   return false;
 }
@@ -134,6 +168,8 @@ export async function runChallengeValidation(
  * Startet das Hintergrund-Polling: Alle ~15 s werden pending Challenges geprüft
  * (Domain aufrufen, ob key_authorization ausgeliefert wird). Dashboard zeigt dann Timer/Zähler.
  */
+const MANUAL_ACCEPT_EXPIRE_SEC = 60;
+
 export function startValidationPolling(database: Database): void {
   setInterval(() => {
     const pending = database
@@ -149,6 +185,21 @@ export function startValidationPolling(database: Database): void {
           logger.debug('validation polling error', { challengeId: row.challengeId, error: String(err) })
         );
       }
+    }
+    const expiredManual = database
+      .prepare(
+        `SELECT c.authz_id AS authzId FROM ca_challenges c
+         JOIN ca_authorizations a ON a.authz_id = c.authz_id
+         JOIN ca_orders o ON o.order_id = a.order_id
+         WHERE c.status = 'valid' AND c.accepted_at IS NOT NULL
+         AND c.accepted_at + ? <= cast(strftime('%s','now') as integer)
+         AND o.status != 'valid'`
+      )
+      .all(MANUAL_ACCEPT_EXPIRE_SEC) as Array<{ authzId: string }>;
+    for (const row of expiredManual) {
+      database.prepare('DELETE FROM ca_challenges WHERE authz_id = ?').run(row.authzId);
+      database.prepare('DELETE FROM ca_authorizations WHERE authz_id = ?').run(row.authzId);
+      logger.debug('acme manual-accept expired', { authzId: row.authzId });
     }
   }, POLLING_INTERVAL_MS);
   logger.debug('acme validation polling started', { intervalMs: POLLING_INTERVAL_MS });
@@ -251,8 +302,31 @@ export async function handleAcme(
       if (!identifiers?.length) {
         return Response.json({ type: 'urn:ietf:params:acme:error:malformed' }, { status: 400 });
       }
-      const orderId = 'order-' + crypto.randomBytes(8).toString('hex');
       const accountIdFromKid = (protectedHeader.kid as string).split('/').pop() ?? accountId ?? '';
+
+      for (const identifier of identifiers) {
+        const remainingMs = getCooldownRemainingMs(identifier.value);
+        if (remainingMs > 0) {
+          const retryAfterSec = Math.ceil(remainingMs / 1000);
+          logger.debug('acme new-order cooldown', { domain: identifier.value, retryAfterSec });
+          return new Response(
+            JSON.stringify({
+              type: 'urn:ietf:params:acme:error:rateLimited',
+              detail: `Nach fehlgeschlagener Challenge bitte ${retryAfterSec} Sekunden warten bevor eine neue Order für diese Domain angefordert wird.`,
+            }),
+            {
+              status: 429,
+              headers: {
+                'Content-Type': 'application/json',
+                'Replay-Nonce': generateNonce(),
+                'Retry-After': String(retryAfterSec),
+              },
+            }
+          );
+        }
+      }
+
+      const orderId = 'order-' + crypto.randomBytes(8).toString('hex');
       database.prepare(
         'INSERT INTO ca_orders (order_id, account_id, identifiers, status, finalize_url) VALUES (?, ?, ?, ?, ?)'
       ).run(orderId, accountIdFromKid, JSON.stringify(identifiers), 'pending', baseUrl + '/acme/finalize/' + orderId);
@@ -261,6 +335,9 @@ export async function handleAcme(
       const accountJwk = accountJwkRow ? (JSON.parse(accountJwkRow.jwk) as { e: string; kty: string; n: string }) : null;
       const thumbprint = accountJwk ? jwkThumbprint(accountJwk) : '';
       const authorizationIds: string[] = [];
+      const whitelistRows = database
+        .prepare('SELECT domain FROM acme_whitelist_domains')
+        .all() as Array<{ domain: string }>;
 
       for (const identifier of identifiers) {
         const authorizationId = 'authz-' + crypto.randomBytes(8).toString('hex');
@@ -274,6 +351,20 @@ export async function handleAcme(
         database.prepare(
           'INSERT INTO ca_challenges (challenge_id, authz_id, type, token, key_authorization, status) VALUES (?, ?, ?, ?, ?, ?)'
         ).run(challengeId, authorizationId, 'http-01', token, keyAuthorization, 'pending');
+        const isWhitelisted = whitelistRows.some((row) => {
+          const w = row.domain;
+          if (identifier.value === w) return true;
+          if (w.startsWith('*.')) {
+            const suffix = w.slice(2);
+            return identifier.value === suffix || identifier.value.endsWith('.' + suffix);
+          }
+          return false;
+        });
+        if (isWhitelisted) {
+          logger.debug('acme new-order whitelist accept', { domain: identifier.value });
+          database.prepare('UPDATE ca_challenges SET status = ? WHERE challenge_id = ?').run('valid', challengeId);
+          database.prepare('UPDATE ca_authorizations SET status = ? WHERE authz_id = ?').run('valid', authorizationId);
+        }
       }
 
       const authorizationUrls = authorizationIds.map((authorizationId) => baseUrl + '/acme/authz/' + authorizationId);
@@ -430,6 +521,8 @@ export async function handleAcme(
         const insertResult = database.prepare('INSERT INTO ca_certificates (order_id, pem) VALUES (?, ?)').run(orderId, chainPem);
         const certificateRowId = insertResult.lastInsertRowid as number;
         database.prepare('UPDATE ca_orders SET status = ?, cert_id = ? WHERE order_id = ?').run('valid', certificateRowId, orderId);
+        database.prepare('DELETE FROM ca_challenges WHERE authz_id IN (SELECT authz_id FROM ca_authorizations WHERE order_id = ?)').run(orderId);
+        database.prepare('DELETE FROM ca_authorizations WHERE order_id = ?').run(orderId);
 
         const domainList = JSON.parse(orderRow.identifiers) as Array<{ value: string }>;
         const notAfter = certificate.validity.notAfter.toISOString();

@@ -14,7 +14,14 @@ export interface SummaryData {
     caConfigured: boolean;
   };
   challenges: Array<{ id: number; token: string; domain: string; expires_at: string | null }>;
-  acmeChallenges: Array<{ challengeId: string; token: string; domain: string; status: string; authzId: string }>;
+  acmeChallenges: Array<{
+    challengeId: string;
+    token: string;
+    domain: string;
+    status: string;
+    authzId: string;
+    acceptedAt: number | null;
+  }>;
   acmeValidationStatus: Array<{
     challengeId: string;
     domain: string;
@@ -30,6 +37,7 @@ export interface SummaryData {
     has_pem: number;
     issuer_id: string | null;
     revoked: number;
+    ca_certificate_id: number | null;
   }>;
   cas: Array<{
     id: string;
@@ -49,6 +57,7 @@ export interface SummaryData {
     createdAt: string | null;
     isIntermediate: true;
   }>;
+  acmeWhitelistDomains: Array<{ id: number; domain: string; createdAt: string | null }>;
 }
 
 export function getSummaryData(
@@ -72,18 +81,30 @@ export function getSummaryData(
 
   const acmeChallenges = database
     .prepare(
-      `SELECT c.challenge_id AS challengeId, c.token, a.identifier AS domain, c.status, a.authz_id AS authzId
+      `SELECT c.challenge_id AS challengeId, c.token, a.identifier AS domain, c.status, a.authz_id AS authzId, c.accepted_at AS acceptedAt
        FROM ca_challenges c
        JOIN ca_authorizations a ON a.authz_id = c.authz_id
-       WHERE a.status = 'pending' OR c.status = 'pending'
+       WHERE (a.status = 'pending' OR c.status = 'pending')
+          OR (c.status = 'valid' AND c.accepted_at IS NOT NULL)
        ORDER BY c.id DESC`
     )
-    .all() as Array<{ challengeId: string; token: string; domain: string; status: string; authzId: string }>;
+    .all() as Array<{
+      challengeId: string;
+      token: string;
+      domain: string;
+      status: string;
+      authzId: string;
+      acceptedAt: number | null;
+    }>;
 
   const acmeValidationStatus = getValidationStatus();
 
+  const acmeWhitelistDomains = database
+    .prepare('SELECT id, domain, created_at AS createdAt FROM acme_whitelist_domains ORDER BY domain')
+    .all() as Array<{ id: number; domain: string; createdAt: string | null }>;
+
   const certificates = database.prepare(
-    `SELECT c.id, c.domain, c.not_after, c.created_at, (c.pem IS NOT NULL) as has_pem, c.issuer_id,
+    `SELECT c.id, c.domain, c.not_after, c.created_at, (c.pem IS NOT NULL) as has_pem, c.issuer_id, c.ca_certificate_id,
             (SELECT 1 FROM revoked_certificates r WHERE r.cert_id = c.id) AS revoked
      FROM certificates c ORDER BY c.id DESC`
   ).all() as Array<{
@@ -93,6 +114,7 @@ export function getSummaryData(
     created_at: string | null;
     has_pem: number;
     issuer_id: string | null;
+    ca_certificate_id: number | null;
     revoked: number | null;
   }>;
   const certificatesNormalized = certificates.map((c) => ({
@@ -174,5 +196,6 @@ export function getSummaryData(
     certificates: certificatesNormalized,
     cas,
     intermediates,
+    acmeWhitelistDomains,
   };
 }

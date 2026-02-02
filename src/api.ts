@@ -350,6 +350,29 @@ async function handleCertRevoke(context: ApiContext): Promise<Response> {
   return Response.json({ ok: true });
 }
 
+async function handleCertRenew(context: ApiContext): Promise<Response> {
+  const { database, paths, request } = context;
+  try {
+    const body = (await request.json()) as { id?: number };
+    const certId = typeof body.id === 'number' ? body.id : parseInt(String(body.id ?? ''), 10);
+    if (isNaN(certId)) return Response.json({ error: 'id fehlt oder ungültig' }, { status: 400 });
+    const certRow = database
+      .prepare('SELECT id, domain, issuer_id FROM certificates WHERE id = ?')
+      .get(certId) as { id: number; domain: string; issuer_id: string | null } | undefined;
+    if (!certRow) return Response.json({ error: 'Zertifikat nicht gefunden' }, { status: 404 });
+    const revoked = database.prepare('SELECT 1 FROM revoked_certificates WHERE cert_id = ?').get(certId);
+    if (revoked) return Response.json({ error: 'Zertifikat ist bereits widerrufen' }, { status: 400 });
+    const issuerId = certRow.issuer_id ?? getActiveCaId(database);
+    if (!issuerId) return Response.json({ error: 'Keine CA zum Ausstellen gefunden' }, { status: 400 });
+    database.prepare('INSERT INTO revoked_certificates (cert_id) VALUES (?)').run(certId);
+    const newId = createLeafCertificate(database, paths, issuerId, certRow.domain, {});
+    return Response.json({ ok: true, id: newId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return Response.json({ error: message }, { status: 400 });
+  }
+}
+
 async function handleCertRevocationStatus(context: ApiContext): Promise<Response> {
   const { database, url } = context;
   const idParam = url.searchParams.get('id');
@@ -553,8 +576,34 @@ async function handleAcmeChallengeAccept(context: ApiContext): Promise<Response>
   if (!authzId) return Response.json({ error: 'id fehlt' }, { status: 400 });
   const row = database.prepare('SELECT 1 FROM ca_authorizations WHERE authz_id = ?').get(authzId);
   if (!row) return Response.json({ error: 'ACME-Authorisierung nicht gefunden' }, { status: 404 });
-  database.prepare('UPDATE ca_challenges SET status = ? WHERE authz_id = ?').run('valid', authzId);
+  const acceptedAt = Math.floor(Date.now() / 1000);
+  database.prepare('UPDATE ca_challenges SET status = ?, accepted_at = ? WHERE authz_id = ?').run('valid', acceptedAt, authzId);
   database.prepare('UPDATE ca_authorizations SET status = ? WHERE authz_id = ?').run('valid', authzId);
+  return Response.json({ ok: true });
+}
+
+async function handleAcmeWhitelistPost(context: ApiContext): Promise<Response> {
+  const { database, request } = context;
+  try {
+    const body = (await request.json()) as { domain?: string };
+    const domain = typeof body.domain === 'string' ? body.domain.trim().toLowerCase() : '';
+    if (!domain) return Response.json({ error: 'domain fehlt oder leer' }, { status: 400 });
+    const result = database.prepare('INSERT OR IGNORE INTO acme_whitelist_domains (domain) VALUES (?)').run(domain);
+    if (result.changes === 0) return Response.json({ error: 'Domain ist bereits in der Whitelist' }, { status: 400 });
+  } catch {
+    return Response.json({ error: 'Ungültige Anfrage' }, { status: 400 });
+  }
+  return Response.json({ ok: true });
+}
+
+async function handleAcmeWhitelistDelete(context: ApiContext): Promise<Response> {
+  const { database, url } = context;
+  const idParam = url.searchParams.get('id');
+  if (!idParam) return Response.json({ error: 'id fehlt' }, { status: 400 });
+  const id = parseInt(idParam, 10);
+  if (isNaN(id)) return Response.json({ error: 'Ungültige id' }, { status: 400 });
+  const result = database.prepare('DELETE FROM acme_whitelist_domains WHERE id = ?').run(id);
+  if (result.changes === 0) return Response.json({ error: 'Eintrag nicht gefunden' }, { status: 404 });
   return Response.json({ ok: true });
 }
 
@@ -573,6 +622,7 @@ const API_ROUTES: Array<{
   { method: 'GET', path: '/api/cert/info', handler: handleCertInfo },
   { method: 'GET', path: '/api/cert/key', handler: handleCertKey },
   { method: 'POST', path: '/api/cert/revoke', handler: handleCertRevoke },
+  { method: 'POST', path: '/api/cert/renew', handler: handleCertRenew },
   { method: 'GET', path: '/api/cert/revocation-status', handler: handleCertRevocationStatus },
   { method: 'DELETE', path: '/api/cert', handler: handleCertDelete },
   { method: 'GET', path: '/api/ca/info', handler: handleCaInfo },
@@ -581,6 +631,8 @@ const API_ROUTES: Array<{
   { method: 'DELETE', path: '/api/challenges', handler: handleChallengesDelete },
   { method: 'DELETE', path: '/api/acme-authz', handler: handleAcmeAuthzDelete },
   { method: 'POST', path: '/api/acme-challenge/accept', handler: handleAcmeChallengeAccept },
+  { method: 'POST', path: '/api/acme-whitelist', handler: handleAcmeWhitelistPost },
+  { method: 'DELETE', path: '/api/acme-whitelist', handler: handleAcmeWhitelistDelete },
 ];
 
 export async function handleApi(

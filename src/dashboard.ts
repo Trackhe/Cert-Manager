@@ -32,6 +32,7 @@ type CertForTree = {
   has_pem: number;
   issuer_id: string | null;
   revoked?: number;
+  ca_certificate_id?: number | null;
 };
 
 function renderCertTree(
@@ -46,14 +47,20 @@ function renderCertTree(
     const createdAt = cert.created_at ? new Date(cert.created_at).toLocaleString() : '—';
     const issuerName = getIssuerDisplayName(cert.issuer_id, cas, intermediates);
     const isRevoked = cert.revoked !== undefined && cert.revoked !== 0;
-    const metaText = isRevoked ? 'Widerrufen · Gültig bis ' + validUntil : 'Gültig bis ' + validUntil;
-    const revokeBtn = isRevoked ? '' : '<button type="button" class="btn btn-revoke" data-cert-id="' + cert.id + '" title="Zertifikat widerrufen">Widerrufen</button> ';
+    const isExpired = cert.not_after ? new Date(cert.not_after) < new Date() : false;
+    const isAcme = cert.ca_certificate_id != null && cert.ca_certificate_id !== 0;
+    const metaText = (isRevoked ? 'Widerrufen · Gültig bis ' + validUntil : 'Gültig bis ' + validUntil) + (isAcme ? ' · ACME' : '');
+    const revokeBtn =
+      isRevoked || isExpired ? '' : '<button type="button" class="btn btn-revoke" data-cert-id="' + cert.id + '" title="Zertifikat widerrufen">Widerrufen</button> ';
+    const renewBtn =
+      isRevoked || isAcme ? '' : '<button type="button" class="btn btn-renew" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscapeFn(cert.domain) + '" title="Zertifikat erneuern">Erneuern</button> ';
     const actions =
       '<button type="button" class="btn btn-view-cert" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscapeFn(cert.domain) + '" data-cert-not-after="' + attrEscapeFn(validUntil) + '" data-cert-created-at="' + attrEscapeFn(createdAt) + '" data-cert-issuer="' + attrEscapeFn(issuerName) + '" title="Details anzeigen">View</button> ' +
       (cert.has_pem
         ? '<a href="/api/cert/download?id=' + cert.id + '" class="btn" download>Zertifikat</a> <a href="/api/cert/key?id=' + cert.id + '" class="btn" download>Schlüssel</a> '
         : '') +
       revokeBtn +
+      renewBtn +
       '<button type="button" class="btn btn-delete" data-cert-id="' + cert.id + '" title="Zertifikat löschen">Löschen</button>';
     return (
       '<li class="cert-tree__item cert-tree__item--depth-' +
@@ -172,7 +179,7 @@ function renderCertTree(
 }
 
 export function renderDashboard(database: Database, paths: PathHelpers): Response {
-  const { summary, challenges, acmeChallenges, acmeValidationStatus, certificates, cas, intermediates } = getSummaryData(database, paths);
+  const { summary, challenges, acmeChallenges, acmeValidationStatus, acmeWhitelistDomains, certificates, cas, intermediates } = getSummaryData(database, paths);
   const initialData = { cas, intermediates, caConfigured: summary.caConfigured };
   const initialDataJson = escapeForScript(JSON.stringify(initialData));
 
@@ -235,10 +242,22 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       font-size: 20px;
       font-weight: 600;
     }
-    .theme-toggle {
+    .gh-header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .theme-toggle,
+    .gh-header-btn {
       padding: 6px 12px;
       font-size: 18px;
       line-height: 1;
+    }
+    .gh-header-btn svg {
+      display: block;
+      width: 1.25em;
+      height: 1.25em;
     }
     main {
       max-width: 1340px;
@@ -362,15 +381,30 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     .acme-validation-countdown { font-variant-numeric: tabular-nums; }
     .acme-validation-hint { font-size: 12px; color: var(--gh-fg-muted); margin-left: 4px; }
     .acme-validation-waiting { flex-wrap: wrap; }
+    .acme-challenges-table { width: 100%; }
+    .acme-challenges-table th:last-child, .acme-challenges-table td:last-child { text-align: right; }
+    .acme-challenges-table .btn { padding: 2px 8px; font-size: 12px; }
+    .gh-card-body input[type="text"] { padding: 5px 12px; font-size: 14px; border: 1px solid var(--gh-border); border-radius: 6px; font-family: inherit; background: var(--gh-canvas); color: var(--gh-fg); box-sizing: border-box; }
+    .gh-card-body .acme-whitelist-form input[type="text"] { flex: 1; min-width: 0; }
+    .acme-whitelist-table { width: 100%; }
+    .acme-whitelist-table th:last-child, .acme-whitelist-table td:last-child { text-align: right; }
+    .acme-whitelist-table .btn { padding: 2px 8px; font-size: 12px; }
+    .btn-renew { background: var(--gh-accent); color: #fff; border-color: var(--gh-accent); }
+    .btn-renew:hover { background: var(--gh-accent-hover); border-color: var(--gh-accent-hover); }
   </style>
 </head>
 <body>
   <div id="toast" role="alert" aria-live="assertive"></div>
   <header class="gh-header">
-    <button type="button" id="themeToggle" class="btn theme-toggle" title="Dark/Light umschalten" aria-label="Theme umschalten">
-      <span class="theme-toggle-icon theme-icon-light" aria-hidden="true">☀</span>
-      <span class="theme-toggle-icon theme-icon-dark" aria-hidden="true" style="display:none">☽</span>
-    </button>
+    <div class="gh-header-actions">
+      <a href="https://github.com/Trackhe/Cert-Manager" target="_blank" rel="noopener noreferrer" class="btn gh-header-btn theme-toggle" title="Cert-Manager auf GitHub" aria-label="GitHub öffnen">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+      </a>
+      <button type="button" id="themeToggle" class="btn theme-toggle" title="Dark/Light umschalten" aria-label="Theme umschalten">
+        <span class="theme-toggle-icon theme-icon-light" aria-hidden="true">☀</span>
+        <span class="theme-toggle-icon theme-icon-dark" aria-hidden="true" style="display:none">☽</span>
+      </button>
+    </div>
   </header>
   <main>
   <section class="summary">
@@ -392,7 +426,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     </div>
     <div class="summary-item">
       <dt>Let's Encrypt Account</dt>
-      <dd id="letsEncryptEmail">${summary.letsEncrypt ? htmlEscape(summary.letsEncrypt.email) : '—'}</dd>
+      <dd id="letsEncryptEmail">${summary.letsEncrypt ? htmlEscape(summary.letsEncrypt.email) : 'coming soon'}</dd>
       <dt id="accountUrlLabel" style="margin-top:8px; display:${summary.letsEncrypt?.accountUrl ? 'block' : 'none'}">Account URL</dt>
       <dd id="letsEncryptUrl" style="word-break:break-all;font-size:0.9em">${summary.letsEncrypt?.accountUrl ? htmlEscape(summary.letsEncrypt.accountUrl) : ''}</dd>
     </div>
@@ -597,6 +631,17 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     </div>
   </div>
 
+  <div id="certRenewModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certRenewModalTitle" onclick="if(event.target===this) closeModal('certRenewModal')">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px">
+      <h3 id="certRenewModalTitle">Zertifikat erneuern</h3>
+      <p id="certRenewModalText" style="margin:0 0 16px;font-size:14px">Zertifikat für <strong id="certRenewDomain"></strong> erneuern? Das bestehende Zertifikat wird widerrufen und ein neues ausgestellt.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('certRenewModal')">Abbrechen</button>
+        <button type="button" class="btn" id="certRenewConfirmBtn">Erneuern</button>
+      </div>
+    </div>
+  </div>
+
   <div class="gh-card">
     <div class="gh-card-header">Challenges</div>
     <div class="gh-card-body">
@@ -624,36 +669,73 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     <div class="gh-card-header">ACME-Challenges (Certbot / Bestellungen)</div>
     <div class="gh-card-body">
   <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Offene Challenges aus ACME-Bestellungen. Der Server liefert die Validierung unter <code>/.well-known/acme-challenge/&lt;Token&gt;</code>.</p>
-  <table>
+  <table class="acme-challenges-table">
     <thead><tr><th>Domain</th><th>Token</th><th>Status</th><th>Validierung</th><th></th></tr></thead>
     <tbody id="acmeChallenges">${acmeChallenges.length === 0
       ? '<tr><td colspan="5" class="empty-table">Keine offenen ACME-Challenges</td></tr>'
       : acmeChallenges
           .map((ac) => {
             const val = acmeValidationStatus.find((s) => s.challengeId === ac.challengeId);
-            const validationCell = val
-              ? (() => {
-                  const secs = Math.max(0, Math.ceil((val.nextAttemptAt - Date.now()) / 1000));
-                  const ringOffset = 100 * (1 - Math.min(5, secs) / 5);
-                  return `<span class="acme-validation-progress" data-next-at="${val.nextAttemptAt}">
+            const acceptedExpireAt = ac.acceptedAt != null ? ac.acceptedAt * 1000 + 60000 : 0;
+            let validationCell: string;
+            if (ac.acceptedAt != null) {
+              const secs = Math.max(0, Math.ceil((acceptedExpireAt - Date.now()) / 1000));
+              const ringOffset = 100 * (1 - Math.min(60, secs) / 60);
+              validationCell = `<span class="acme-validation-progress acme-validation-accept-timer" data-next-at="${acceptedExpireAt}" data-timer-max="60">
+  <span class="acme-validation-circle-wrap"><svg class="acme-validation-circle" viewBox="0 0 36 36" aria-hidden="true"><circle class="acme-validation-ring-bg" cx="18" cy="18" r="16"/><circle class="acme-validation-ring-fill" cx="18" cy="18" r="16" style="stroke-dashoffset:${ringOffset}"/></svg></span>
+  <span class="acme-validation-text">Manuell akzeptiert</span>
+  <span>Löschung in <span class="acme-validation-countdown" data-next-at="${acceptedExpireAt}">${secs}</span> s (wenn nicht eingelöst)</span>
+</span>`;
+            } else if (val) {
+              const secs = Math.max(0, Math.ceil((val.nextAttemptAt - Date.now()) / 1000));
+              const ringOffset = 100 * (1 - Math.min(5, secs) / 5);
+              validationCell = `<span class="acme-validation-progress" data-next-at="${val.nextAttemptAt}">
   <span class="acme-validation-circle-wrap"><svg class="acme-validation-circle" viewBox="0 0 36 36" aria-hidden="true"><circle class="acme-validation-ring-bg" cx="18" cy="18" r="16"/><circle class="acme-validation-ring-fill" cx="18" cy="18" r="16" style="stroke-dashoffset:${ringOffset}"/></svg></span>
   <span class="acme-validation-text">Versuch ${val.attemptCount}/${val.maxAttempts}</span>
   <span>nächster in <span class="acme-validation-countdown" data-next-at="${val.nextAttemptAt}">${secs}</span> s</span>
 </span>`;
-                })()
-              : ac.status === 'pending'
-                ? '<span class="acme-validation-progress acme-validation-waiting"><span class="acme-validation-text">Versuch —/5</span><span class="acme-validation-hint">Warte auf Auslösung (Certbot: Enter)</span></span>'
-                : '—';
+            } else if (ac.status === 'pending') {
+              validationCell = '<span class="acme-validation-progress acme-validation-waiting"><span class="acme-validation-text">Versuch —/5</span><span class="acme-validation-hint">Warte auf Auslösung (Certbot: Enter)</span></span>';
+            } else {
+              validationCell = '—';
+            }
+            const displayStatus = ac.acceptedAt != null ? 'akzeptiert' : ac.status;
             return `
       <tr data-authz-id="${attrEscape(ac.authzId)}" data-challenge-id="${attrEscape(ac.challengeId)}">
         <td>${htmlEscape(ac.domain)}</td>
         <td><code>${htmlEscape(ac.token)}</code></td>
-        <td>${htmlEscape(ac.status)}</td>
+        <td>${htmlEscape(displayStatus)}</td>
         <td class="acme-validation-cell">${validationCell}</td>
-        <td><button type="button" class="btn btn-accept-acme btn-accept-acme-authz" data-authz-id="${attrEscape(ac.authzId)}" title="Challenge manuell als gültig markieren">Manuell annehmen</button> <button type="button" class="btn btn-delete btn-delete-acme-authz" data-authz-id="${attrEscape(ac.authzId)}" title="ACME-Challenge löschen">Löschen</button></td>
+        <td>${ac.status !== 'valid' ? `<button type="button" class="btn btn-accept-acme btn-accept-acme-authz" data-authz-id="${attrEscape(ac.authzId)}" title="Challenge manuell als gültig markieren">Manuell annehmen</button> ` : ''}<button type="button" class="btn btn-delete btn-delete-acme-authz" data-authz-id="${attrEscape(ac.authzId)}" title="ACME-Challenge löschen">Löschen</button></td>
       </tr>
     `;
           })
+          .join('')}</tbody>
+  </table>
+    </div>
+  </div>
+
+  <div class="gh-card">
+    <div class="gh-card-header">Domains ohne HTTP-Challenge (Whitelist)</div>
+    <div class="gh-card-body">
+  <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Domains oder Adressen, für die die ACME HTTP-01-Challenge automatisch als gültig akzeptiert wird. Nützlich im lokalen Netz. Mit <code>*.</code> (z. B. <code>*.trackhe.local</code>) werden alle Subdomains akzeptiert.</p>
+  <form id="acmeWhitelistForm" class="acme-whitelist-form" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
+    <input type="text" id="acmeWhitelistDomain" name="domain" placeholder="z. B. test2.example.com, *.trackhe.local">
+    <button type="submit" class="btn">Hinzufügen</button>
+  </form>
+  <table class="acme-whitelist-table">
+    <thead><tr><th>Domain</th><th></th></tr></thead>
+    <tbody id="acmeWhitelistDomains">${acmeWhitelistDomains.length === 0
+      ? '<tr><td colspan="2" class="empty-table">Keine Einträge</td></tr>'
+      : acmeWhitelistDomains
+          .map(
+            (w) => `
+      <tr data-whitelist-id="${attrEscape(String(w.id))}">
+        <td><code>${htmlEscape(w.domain)}</code></td>
+        <td><button type="button" class="btn btn-delete btn-delete-acme-whitelist" data-id="${attrEscape(String(w.id))}" title="Aus Whitelist löschen">Löschen</button></td>
+      </tr>
+    `
+          )
           .join('')}</tbody>
   </table>
     </div>
@@ -711,7 +793,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     function closeModal(id) { var el = document.getElementById(id); if (el) el.classList.remove('open'); }
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
-        ['caModal', 'intermediateModal', 'certCreateModal', 'certViewModal'].forEach(closeModal);
+        ['caModal', 'intermediateModal', 'certCreateModal', 'certViewModal', 'certRenewModal'].forEach(closeModal);
       }
     });
     function copyDirectoryUrl() {
@@ -740,8 +822,11 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         var nextAt = parseInt(wrapper.getAttribute('data-next-at'), 10);
         if (isNaN(nextAt)) return;
         var secs = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
+        var maxSecs = 5;
+        var timerMax = wrapper.getAttribute('data-timer-max');
+        if (timerMax) { var m = parseInt(timerMax, 10); if (!isNaN(m)) maxSecs = m; }
         var fill = wrapper.querySelector('.acme-validation-ring-fill');
-        if (fill) fill.style.strokeDashoffset = String(100 * (1 - Math.min(5, secs) / 5));
+        if (fill) fill.style.strokeDashoffset = String(100 * (1 - Math.min(maxSecs, secs) / maxSecs));
       });
     }, 1000);
     document.body.addEventListener('click', function(e) {
@@ -781,6 +866,18 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
+      var delWhitelistBtn = e.target.closest && e.target.closest('.btn-delete-acme-whitelist');
+      if (delWhitelistBtn) {
+        e.preventDefault();
+        var wid = delWhitelistBtn.getAttribute('data-id');
+        if (wid) {
+          delWhitelistBtn.disabled = true;
+          fetch('/api/acme-whitelist?id=' + encodeURIComponent(wid), { method: 'DELETE' }).then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); }).then(function(r) {
+            if (r.ok) location.reload(); else showError('Fehler: ' + (r.data && r.data.error ? r.data.error : 'Löschen fehlgeschlagen'));
+          }).catch(function(err) { showError(err && err.message ? err.message : 'Löschen fehlgeschlagen'); }).finally(function() { delWhitelistBtn.disabled = false; });
+        }
+        return;
+      }
       var btn = e.target.closest && e.target.closest('[data-ca-id]');
       if (btn) { e.preventDefault(); activateCa(btn.getAttribute('data-ca-id')); }
     });
@@ -788,6 +885,23 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       const res = await fetch('/api/ca/activate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) });
       if (!res.ok) { showError('Fehler: ' + ((await res.json().catch(function() { return {}; })).error || res.status)); return; }
       location.reload();
+    }
+    var acmeWhitelistForm = document.getElementById('acmeWhitelistForm');
+    if (acmeWhitelistForm) {
+      acmeWhitelistForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var input = document.getElementById('acmeWhitelistDomain');
+        var domain = input && input.value ? input.value.trim().toLowerCase() : '';
+        if (!domain) { showError('Bitte eine Domain eingeben.'); return; }
+        acmeWhitelistForm.querySelector('button[type="submit"]').disabled = true;
+        fetch('/api/acme-whitelist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain: domain }) })
+          .then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); })
+          .then(function(r) {
+            if (r.ok) { input.value = ''; location.reload(); } else { showError('Fehler: ' + (r.data && r.data.error ? r.data.error : 'Hinzufügen fehlgeschlagen')); }
+          })
+          .catch(function(err) { showError(err && err.message ? err.message : 'Hinzufügen fehlgeschlagen'); })
+          .finally(function() { acmeWhitelistForm.querySelector('button[type="submit"]').disabled = false; });
+      });
     }
     updateCaCard(initialData.caConfigured);
     function buildCertTreeHtml(certs, casList, intList) {
@@ -805,9 +919,12 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         var createdAt = cert.created_at ? new Date(cert.created_at).toLocaleString() : '—';
         var issuerName = getIssuerName(cert.issuer_id, casList, intList);
         var isRevoked = cert.revoked !== undefined && cert.revoked !== 0;
-        var metaText = isRevoked ? 'Widerrufen · Gültig bis ' + validUntil : 'Gültig bis ' + validUntil;
-        var revokeBtn = isRevoked ? '' : '<button type="button" class="btn btn-revoke" data-cert-id="' + cert.id + '" title="Zertifikat widerrufen">Widerrufen</button> ';
-        var actions = '<button type="button" class="btn btn-view-cert" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscape(cert.domain) + '" data-cert-not-after="' + attrEscape(validUntil) + '" data-cert-created-at="' + attrEscape(createdAt) + '" data-cert-issuer="' + attrEscape(issuerName) + '" title="Details anzeigen">View</button> ' + (cert.has_pem ? '<a href="/api/cert/download?id=' + cert.id + '" class="btn" download>Zertifikat</a> <a href="/api/cert/key?id=' + cert.id + '" class="btn" download>Schlüssel</a> ' : '') + revokeBtn + '<button type="button" class="btn btn-delete" data-cert-id="' + cert.id + '" title="Zertifikat löschen">Löschen</button>';
+        var isExpired = cert.not_after ? new Date(cert.not_after) < new Date() : false;
+        var isAcme = cert.ca_certificate_id != null && cert.ca_certificate_id !== 0;
+        var metaText = (isRevoked ? 'Widerrufen · Gültig bis ' + validUntil : 'Gültig bis ' + validUntil) + (isAcme ? ' · ACME' : '');
+        var revokeBtn = (isRevoked || isExpired) ? '' : '<button type="button" class="btn btn-revoke" data-cert-id="' + cert.id + '" title="Zertifikat widerrufen">Widerrufen</button> ';
+        var renewBtn = (isRevoked || isAcme) ? '' : '<button type="button" class="btn btn-renew" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscape(cert.domain) + '" title="Zertifikat erneuern">Erneuern</button> ';
+        var actions = '<button type="button" class="btn btn-view-cert" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscape(cert.domain) + '" data-cert-not-after="' + attrEscape(validUntil) + '" data-cert-created-at="' + attrEscape(createdAt) + '" data-cert-issuer="' + attrEscape(issuerName) + '" title="Details anzeigen">View</button> ' + (cert.has_pem ? '<a href="/api/cert/download?id=' + cert.id + '" class="btn" download>Zertifikat</a> <a href="/api/cert/key?id=' + cert.id + '" class="btn" download>Schlüssel</a> ' : '') + revokeBtn + renewBtn + '<button type="button" class="btn btn-delete" data-cert-id="' + cert.id + '" title="Zertifikat löschen">Löschen</button>';
         return '<li class="cert-tree__item cert-tree__item--depth-' + depth + (isRevoked ? ' cert-tree__item--revoked' : '') + '"><span class="cert-tree__label">' + htmlEscapeClient(cert.domain) + '</span><span class="cert-tree__meta">' + metaText + '</span><span class="cert-tree__actions">' + actions + '</span></li>';
       }
       function togglerRow(depth, label, meta, actions) {
@@ -973,6 +1090,20 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }).catch(function(err) { showError(err && err.message ? err.message : 'Laden fehlgeschlagen'); document.getElementById('certViewPem').textContent = '—'; });
         return;
       }
+      var renewBtn = e.target.closest && e.target.closest('.btn-renew');
+      if (renewBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        var certId = renewBtn.getAttribute('data-cert-id');
+        var domain = renewBtn.getAttribute('data-cert-domain');
+        if (certId && domain != null) {
+          document.getElementById('certRenewDomain').textContent = domain.replace(/&quot;/g, '"');
+          var confirmBtn = document.getElementById('certRenewConfirmBtn');
+          if (confirmBtn) { confirmBtn.setAttribute('data-cert-id', certId); }
+          document.getElementById('certRenewModal').classList.add('open');
+        }
+        return;
+      }
       var revokeBtn = e.target.closest && e.target.closest('.btn-revoke');
       if (revokeBtn) {
         e.preventDefault();
@@ -1101,6 +1232,21 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       document.getElementById('certCreateSuccess').style.display = 'none';
       document.getElementById('certCreateModal').classList.add('open');
     }
+    var certRenewConfirmBtn = document.getElementById('certRenewConfirmBtn');
+    if (certRenewConfirmBtn) {
+      certRenewConfirmBtn.addEventListener('click', function() {
+        var certId = this.getAttribute('data-cert-id');
+        if (!certId) return;
+        this.disabled = true;
+        fetch('/api/cert/renew', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: parseInt(certId, 10) }) })
+          .then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); })
+          .then(function(r) {
+            if (r.ok) { closeModal('certRenewModal'); location.reload(); } else { showError('Fehler: ' + (r.data && r.data.error ? r.data.error : 'Erneuern fehlgeschlagen')); }
+          })
+          .catch(function(err) { showError(err && err.message ? err.message : 'Erneuern fehlgeschlagen'); })
+          .finally(function() { certRenewConfirmBtn.disabled = false; });
+      });
+    }
     async function submitCertCreate(ev) {
       if (ev && ev.preventDefault) ev.preventDefault();
       var form = document.getElementById('certCreateForm');
@@ -1184,7 +1330,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       document.getElementById('certsValid').textContent = s.certsValid;
       document.getElementById('timeUtc').textContent = s.timeUtc;
       document.getElementById('timeLocal').textContent = s.timeLocal;
-      document.getElementById('letsEncryptEmail').textContent = s.letsEncrypt ? s.letsEncrypt.email : '—';
+      document.getElementById('letsEncryptEmail').textContent = s.letsEncrypt ? s.letsEncrypt.email : 'coming soon';
       const urlEl = document.getElementById('letsEncryptUrl');
       const labelEl = document.getElementById('accountUrlLabel');
       if (s.letsEncrypt && s.letsEncrypt.accountUrl) {
@@ -1213,7 +1359,14 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         function acmeRow(ac) {
           var val = valStatus.find(function(s) { return s.challengeId === ac.challengeId; });
           var validationCell;
-          if (val) {
+          var displayStatus = ac.status;
+          if (ac.acceptedAt != null) {
+            var acceptedExpireAt = ac.acceptedAt * 1000 + 60000;
+            var secsAcc = Math.max(0, Math.ceil((acceptedExpireAt - Date.now()) / 1000));
+            var ringOffsetAcc = 100 * (1 - Math.min(60, secsAcc) / 60);
+            validationCell = '<span class="acme-validation-progress acme-validation-accept-timer" data-next-at="' + acceptedExpireAt + '" data-timer-max="60"><span class="acme-validation-circle-wrap"><svg class="acme-validation-circle" viewBox="0 0 36 36" aria-hidden="true"><circle class="acme-validation-ring-bg" cx="18" cy="18" r="16"/><circle class="acme-validation-ring-fill" cx="18" cy="18" r="16" style="stroke-dashoffset:' + ringOffsetAcc + '"/></svg></span><span class="acme-validation-text">Manuell akzeptiert</span><span>Löschung in <span class="acme-validation-countdown" data-next-at="' + acceptedExpireAt + '">' + secsAcc + '</span> s (wenn nicht eingelöst)</span></span>';
+            displayStatus = 'akzeptiert';
+          } else if (val) {
             var secs = Math.max(0, Math.ceil((val.nextAttemptAt - Date.now()) / 1000));
             var ringOffset = 100 * (1 - Math.min(5, secs) / 5);
             validationCell = '<span class="acme-validation-progress" data-next-at="' + val.nextAttemptAt + '"><span class="acme-validation-circle-wrap"><svg class="acme-validation-circle" viewBox="0 0 36 36" aria-hidden="true"><circle class="acme-validation-ring-bg" cx="18" cy="18" r="16"/><circle class="acme-validation-ring-fill" cx="18" cy="18" r="16" style="stroke-dashoffset:' + ringOffset + '"/></svg></span><span class="acme-validation-text">Versuch ' + val.attemptCount + '/' + val.maxAttempts + '</span><span>nächster in <span class="acme-validation-countdown" data-next-at="' + val.nextAttemptAt + '">' + secs + '</span> s</span></span>';
@@ -1222,11 +1375,20 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           } else {
             validationCell = '—';
           }
-          return '<tr data-authz-id="' + attrEscapeClient(ac.authzId) + '" data-challenge-id="' + attrEscapeClient(ac.challengeId) + '"><td>' + htmlEscapeClient(ac.domain) + '</td><td><code>' + htmlEscapeClient(ac.token) + '</code></td><td>' + htmlEscapeClient(ac.status) + '</td><td class="acme-validation-cell">' + validationCell + '</td><td><button type="button" class="btn btn-accept-acme btn-accept-acme-authz" data-authz-id="' + attrEscapeClient(ac.authzId) + '" title="Challenge manuell als gültig markieren">Manuell annehmen</button> <button type="button" class="btn btn-delete btn-delete-acme-authz" data-authz-id="' + attrEscapeClient(ac.authzId) + '" title="ACME-Challenge löschen">Löschen</button></td></tr>';
+          var acceptBtn = ac.status !== 'valid' ? '<button type="button" class="btn btn-accept-acme btn-accept-acme-authz" data-authz-id="' + attrEscapeClient(ac.authzId) + '" title="Challenge manuell als gültig markieren">Manuell annehmen</button> ' : '';
+          return '<tr data-authz-id="' + attrEscapeClient(ac.authzId) + '" data-challenge-id="' + attrEscapeClient(ac.challengeId) + '"><td>' + htmlEscapeClient(ac.domain) + '</td><td><code>' + htmlEscapeClient(ac.token) + '</code></td><td>' + htmlEscapeClient(displayStatus) + '</td><td class="acme-validation-cell">' + validationCell + '</td><td>' + acceptBtn + '<button type="button" class="btn btn-delete btn-delete-acme-authz" data-authz-id="' + attrEscapeClient(ac.authzId) + '" title="ACME-Challenge löschen">Löschen</button></td></tr>';
         }
         acmeChallengesEl.innerHTML = ach.length === 0
           ? '<tr><td colspan="5" class="empty-table">Keine offenen ACME-Challenges</td></tr>'
           : ach.map(acmeRow).join('');
+      }
+      var acmeWhitelistEl = document.getElementById('acmeWhitelistDomains');
+      if (acmeWhitelistEl && d.acmeWhitelistDomains) {
+        var wl = d.acmeWhitelistDomains;
+        function attrEsc(s) { return (s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
+        acmeWhitelistEl.innerHTML = wl.length === 0
+          ? '<tr><td colspan="2" class="empty-table">Keine Einträge</td></tr>'
+          : wl.map(function(w) { return '<tr data-whitelist-id="' + attrEsc(String(w.id)) + '"><td><code>' + (w.domain || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</code></td><td><button type="button" class="btn btn-delete btn-delete-acme-whitelist" data-id="' + attrEsc(String(w.id)) + '" title="Aus Whitelist löschen">Löschen</button></td></tr>'; }).join('');
       }
     };
   </script>

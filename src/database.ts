@@ -85,6 +85,11 @@ const SCHEMA_STATEMENTS = [
     cert_id INTEGER PRIMARY KEY REFERENCES certificates(id),
     revoked_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS acme_whitelist_domains (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    domain TEXT UNIQUE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
 ];
 
 function ensureColumn(
@@ -120,4 +125,5 @@ export function runMigrations(
   ensureColumn(database, 'certificates', 'issuer_id', 'TEXT');
   ensureColumn(database, 'certificates', 'ca_certificate_id', 'INTEGER');
   ensureColumn(database, 'cas', 'not_after', 'DATETIME');
+  ensureColumn(database, 'ca_challenges', 'accepted_at', 'INTEGER');
 }
