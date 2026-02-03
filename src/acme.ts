@@ -22,6 +22,7 @@ import {
 import { getActiveAcmeIntermediateId, getActiveCaId, getCa, getCaIdForAcmeDomain, getSignerCa } from './ca.js';
 import { logger } from './logger.js';
 import type { PathHelpers } from './paths.js';
+import { matchesWildcardDomain } from './utils.js';
 
 const webCrypto = globalThis.crypto;
 
@@ -192,15 +193,7 @@ export async function runChallengeValidation(
   const whitelistRows = database
     .prepare('SELECT domain FROM acme_whitelist_domains')
     .all() as Array<{ domain: string }>;
-  const isWhitelisted = whitelistRows.some((row) => {
-    const w = row.domain;
-    if (domain === w) return true;
-    if (w.startsWith('*.')) {
-      const suffix = w.slice(2);
-      return domain === suffix || domain.endsWith('.' + suffix);
-    }
-    return false;
-  });
+  const isWhitelisted = whitelistRows.some((row) => matchesWildcardDomain(domain, row.domain));
   if (isWhitelisted) {
     logger.debug('acme challenge whitelisted', { domain });
     const acceptedAt = Math.floor(Date.now() / 1000);
@@ -445,15 +438,7 @@ export async function handleAcme(
         database.prepare(
           'INSERT INTO ca_challenges (challenge_id, authz_id, type, token, key_authorization, status) VALUES (?, ?, ?, ?, ?, ?)'
         ).run(challengeId, authorizationId, 'http-01', token, keyAuthorization, 'pending');
-        const isWhitelisted = whitelistRows.some((row) => {
-          const w = row.domain;
-          if (identifier.value === w) return true;
-          if (w.startsWith('*.')) {
-            const suffix = w.slice(2);
-            return identifier.value === suffix || identifier.value.endsWith('.' + suffix);
-          }
-          return false;
-        });
+        const isWhitelisted = whitelistRows.some((row) => matchesWildcardDomain(identifier.value, row.domain));
         if (isWhitelisted) {
           logger.debug('acme new-order whitelist accept', { domain: identifier.value });
           database.prepare('UPDATE ca_challenges SET status = ? WHERE challenge_id = ?').run('valid', challengeId);
@@ -481,8 +466,8 @@ export async function handleAcme(
     }
 
     const challengePathMatch = pathname.match(/^\/acme\/chall\/([^/]+)$/);
-    if (challengePathMatch) {
-      const challengeId = challengePathMatch[1]!;
+    if (challengePathMatch && challengePathMatch[1]) {
+      const challengeId = challengePathMatch[1];
       logger.debug('acme challenge validate', { challengeId });
       const challengeRow = database
         .prepare('SELECT authz_id, token, key_authorization, status FROM ca_challenges WHERE challenge_id = ?')
@@ -492,7 +477,10 @@ export async function handleAcme(
       }
       const authorizationRow = database
         .prepare('SELECT identifier FROM ca_authorizations WHERE authz_id = ?')
-        .get(challengeRow.authz_id) as { identifier: string };
+        .get(challengeRow.authz_id) as { identifier: string } | undefined;
+      if (!authorizationRow) {
+        return Response.json({ type: 'urn:ietf:params:acme:error:malformed' }, { status: 404 });
+      }
       const domain = authorizationRow.identifier;
 
       // Bereits per „Manuell annehmen“ oder vorherigen Lauf validiert → sofort Erfolg
@@ -529,8 +517,8 @@ export async function handleAcme(
     }
 
     const finalizePathMatch = pathname.match(/^\/acme\/finalize\/([^/]+)$/);
-    if (finalizePathMatch) {
-      const orderId = finalizePathMatch[1]!;
+    if (finalizePathMatch && finalizePathMatch[1]) {
+      const orderId = finalizePathMatch[1];
       logger.debug('acme finalize', { orderId });
       try {
         const orderRow = database
@@ -697,8 +685,8 @@ export async function handleAcme(
     }
 
     const authzPostMatch = pathname.match(/^\/acme\/authz\/([^/]+)$/);
-    if (authzPostMatch && requestUrl === baseUrl + '/acme/authz/' + authzPostMatch[1]) {
-      const authorizationId = authzPostMatch[1]!;
+    if (authzPostMatch && authzPostMatch[1] && requestUrl === baseUrl + '/acme/authz/' + authzPostMatch[1]) {
+      const authorizationId = authzPostMatch[1];
       logger.debug('acme authz POST', { authorizationId });
       const authorizationRow = database
         .prepare('SELECT authz_id, order_id, identifier, status FROM ca_authorizations WHERE authz_id = ?')
@@ -726,8 +714,8 @@ export async function handleAcme(
     }
 
     const certPostMatch = pathname.match(/^\/acme\/cert\/([^/]+)$/);
-    if (certPostMatch) {
-      const orderId = certPostMatch[1]!;
+    if (certPostMatch && certPostMatch[1]) {
+      const orderId = certPostMatch[1];
       logger.debug('acme cert POST-as-GET', { orderId });
       const certificateRow = database
         .prepare('SELECT pem FROM ca_certificates WHERE order_id = ?')
@@ -746,8 +734,8 @@ export async function handleAcme(
     }
 
     const orderPostMatch = pathname.match(/^\/acme\/order\/([^/]+)$/);
-    if (orderPostMatch) {
-      const orderId = orderPostMatch[1]!;
+    if (orderPostMatch && orderPostMatch[1]) {
+      const orderId = orderPostMatch[1];
       logger.debug('acme order POST-as-GET', { orderId });
       const orderRow = database
         .prepare('SELECT order_id, account_id, identifiers, status, finalize_url, cert_id FROM ca_orders WHERE order_id = ?')
@@ -777,8 +765,8 @@ export async function handleAcme(
   }
 
   const authzPathMatch = pathname.match(/^\/acme\/authz\/([^/]+)$/);
-  if (authzPathMatch && request.method === 'GET') {
-    const authorizationId = authzPathMatch[1]!;
+  if (authzPathMatch && authzPathMatch[1] && request.method === 'GET') {
+    const authorizationId = authzPathMatch[1];
     logger.debug('acme authz GET', { authorizationId });
     const authorizationRow = database
       .prepare('SELECT authz_id, order_id, identifier, status FROM ca_authorizations WHERE authz_id = ?')
@@ -819,8 +807,8 @@ export async function handleAcme(
   }
 
   const certPathMatch = pathname.match(/^\/acme\/cert\/([^/]+)$/);
-  if (certPathMatch && request.method === 'GET') {
-    const orderId = certPathMatch[1]!;
+  if (certPathMatch && certPathMatch[1] && request.method === 'GET') {
+    const orderId = certPathMatch[1];
     logger.debug('acme cert GET', { orderId });
     const certificateRow = database
       .prepare('SELECT pem FROM ca_certificates WHERE order_id = ?')
