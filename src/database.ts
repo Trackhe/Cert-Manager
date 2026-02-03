@@ -1,6 +1,25 @@
 import { Database } from 'bun:sqlite';
 import type { PathHelpers } from './paths.js';
 
+// Config-Schlüssel (für config-Tabelle) und Fallbacks in einem Ort
+export const CONFIG_KEY_ACTIVE_CA_ID = 'active_ca_id';
+export const CONFIG_KEY_ACTIVE_ACME_INTERMEDIATE_ID = 'active_acme_intermediate_id';
+export const CONFIG_KEY_DEFAULT_COMMON_NAME_ROOT = 'default_common_name_root';
+export const CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE = 'default_common_name_intermediate';
+export const CONFIG_KEY_DEFAULT_KEY_SIZE = 'default_key_size';
+export const CONFIG_KEY_DEFAULT_VALIDITY_YEARS = 'default_validity_years';
+export const CONFIG_KEY_DEFAULT_VALIDITY_DAYS = 'default_validity_days';
+export const CONFIG_KEY_DEFAULT_HASH_ALGORITHM = 'default_hash_algorithm';
+
+const CONFIG_FALLBACKS: Record<string, string> = {
+  [CONFIG_KEY_DEFAULT_COMMON_NAME_ROOT]: 'Meine CA',
+  [CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE]: 'Intermediate CA',
+  [CONFIG_KEY_DEFAULT_KEY_SIZE]: '2048',
+  [CONFIG_KEY_DEFAULT_VALIDITY_YEARS]: '10',
+  [CONFIG_KEY_DEFAULT_VALIDITY_DAYS]: '365',
+  [CONFIG_KEY_DEFAULT_HASH_ALGORITHM]: 'sha256',
+};
+
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS challenges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,6 +109,23 @@ const SCHEMA_STATEMENTS = [
     domain TEXT UNIQUE NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`,
+  `CREATE TABLE IF NOT EXISTS request_stats (
+    date TEXT PRIMARY KEY,
+    count INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE TABLE IF NOT EXISTS acme_ca_domain_assignments (
+    domain_pattern TEXT PRIMARY KEY,
+    ca_id TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS cert_renewals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    renewed_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`,
+  `CREATE TABLE IF NOT EXISTS log_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    line TEXT NOT NULL
+  )`,
 ];
 
 function ensureColumn(
@@ -98,18 +134,30 @@ function ensureColumn(
   columnName: string,
   columnDefinition: string
 ): void {
-  const tableExists = database.prepare(
-    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?"
-  ).get(tableName);
-  if (!tableExists) return;
   const columns = database.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
-  if (columns.some((column) => column.name === columnName)) return;
+  if (columns.some((c) => c.name === columnName)) return;
   database.run(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
 }
 
 export function createDatabase(dbPath: string): Database {
   return new Database(dbPath);
 }
+
+/** Liest einen Config-Wert aus der DB, bei Fehlen Fallback aus CONFIG_FALLBACKS. */
+export function getConfigValue(database: Database, key: string): string | null {
+  const row = database.prepare('SELECT value FROM config WHERE key = ?').get(key) as { value: string } | undefined;
+  return row?.value ?? CONFIG_FALLBACKS[key] ?? null;
+}
+
+/** Liest einen numerischen Config-Wert (z. B. key_size, validity_days). */
+export function getConfigInt(database: Database, key: string): number {
+  const s = getConfigValue(database, key);
+  const n = s != null ? parseInt(s, 10) : NaN;
+  const fallback = CONFIG_FALLBACKS[key];
+  return Number.isNaN(n) && fallback != null ? parseInt(fallback, 10) : n;
+}
+
+const DEFAULT_CONFIG_SEED: Array<[string, string]> = Object.entries(CONFIG_FALLBACKS);
 
 export function runMigrations(
   database: Database,
@@ -126,4 +174,9 @@ export function runMigrations(
   ensureColumn(database, 'certificates', 'ca_certificate_id', 'INTEGER');
   ensureColumn(database, 'cas', 'not_after', 'DATETIME');
   ensureColumn(database, 'ca_challenges', 'accepted_at', 'INTEGER');
+
+  const insertDefault = database.prepare('INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)');
+  for (const [key, value] of DEFAULT_CONFIG_SEED) {
+    insertDefault.run(key, value);
+  }
 }

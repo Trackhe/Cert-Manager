@@ -12,3 +12,8 @@ export function getDbPath(): string {
 export function getPort(): number {
   return Number(process.env.PORT ?? 3000);
 }
+
+/** Hostname the server listens on (e.g. 0.0.0.0 for all interfaces). */
+export function getHostname(): string {
+  return process.env.HOST ?? '0.0.0.0';
+}

@@ -19,7 +19,7 @@ import {
   setValidating,
   updateValidationAttempt,
 } from './acme-validation-state.js';
-import { getActiveCaId, getCa, getSignerCa } from './ca.js';
+import { getActiveAcmeIntermediateId, getActiveCaId, getCa, getCaIdForAcmeDomain, getSignerCa } from './ca.js';
 import { logger } from './logger.js';
 import type { PathHelpers } from './paths.js';
 
@@ -98,7 +98,7 @@ async function signEcdsaCsrWithX509(
         signingKey,
         signingAlgorithm,
         extensions: [
-          new BasicConstraintsExtension(false, 0, true),
+          new BasicConstraintsExtension(false, undefined, true),
           new KeyUsagesExtension(KeyUsageFlags.digitalSignature | KeyUsageFlags.keyAgreement, true),
         ],
       },
@@ -569,10 +569,37 @@ export async function handleAcme(
         if (!rootCa) {
           return Response.json({ type: 'urn:ietf:params:acme:error:serverInternal' }, { status: 503 });
         }
-        const activeCaId = getActiveCaId(database);
-        const firstIntermediate = activeCaId
-          ? (database.prepare('SELECT id FROM intermediate_cas WHERE parent_ca_id = ? LIMIT 1').get(activeCaId) as { id: string } | undefined)
-          : undefined;
+        const identifiers = JSON.parse(orderRow.identifiers) as Array<{ type: string; value: string }>;
+        const firstDomain = identifiers.length > 0 ? identifiers[0]!.value : '';
+        const domainCaId = firstDomain ? getCaIdForAcmeDomain(database, firstDomain) : null;
+        let activeCaId: string | null;
+        let firstIntermediate: { id: string } | undefined;
+        if (domainCaId) {
+          const intRow = database
+            .prepare('SELECT id, parent_ca_id FROM intermediate_cas WHERE id = ?')
+            .get(domainCaId) as { id: string; parent_ca_id: string } | undefined;
+          if (intRow) {
+            firstIntermediate = { id: intRow.id };
+            activeCaId = intRow.parent_ca_id;
+          } else {
+            firstIntermediate = undefined;
+            activeCaId = domainCaId;
+          }
+        } else {
+          const defaultIntermediateId = getActiveAcmeIntermediateId(database);
+          const defaultIntRow = defaultIntermediateId
+            ? (database.prepare('SELECT id, parent_ca_id FROM intermediate_cas WHERE id = ?').get(defaultIntermediateId) as { id: string; parent_ca_id: string } | undefined)
+            : undefined;
+          if (defaultIntRow) {
+            firstIntermediate = { id: defaultIntRow.id };
+            activeCaId = defaultIntRow.parent_ca_id;
+          } else {
+            activeCaId = getActiveCaId(database);
+            firstIntermediate = activeCaId
+              ? (database.prepare('SELECT id FROM intermediate_cas WHERE parent_ca_id = ? LIMIT 1').get(activeCaId) as { id: string } | undefined)
+              : undefined;
+          }
+        }
 
         let leafPem: string;
         let notAfter: string;
@@ -593,6 +620,8 @@ export async function handleAcme(
             ? getSignerCa(database, paths, firstIntermediate.id)
             : rootCa;
           certificate.setIssuer(signer.cert.subject.attributes);
+          // Basic Constraints: CA=false, kein pathLenConstraint (Certbot/RFC verlangt path_length=None bei End-Entity)
+          certificate.setExtensions([{ name: 'basicConstraints', cA: false, critical: true }]);
           certificate.sign(signer.key, forge.md.sha256.create());
           leafPem = forge.pki.certificateToPem(certificate);
           notAfter = certificate.validity.notAfter.toISOString();
@@ -644,6 +673,9 @@ export async function handleAcme(
             certificateRowId
           );
         }
+
+        const domains = domainList.map((d) => d.value);
+        logger.info('ACME-Zertifikat ausgestellt', { orderId, domains, issuerId: issuerIdForCert });
 
         return new Response(
           JSON.stringify({ status: 'valid', certificate: baseUrl + '/acme/cert/' + orderId }),

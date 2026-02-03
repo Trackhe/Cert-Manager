@@ -3,12 +3,14 @@ import { writeFileSync } from 'node:fs';
 // @ts-expect-error no types
 import * as forge from 'node-forge';
 import { getSignerCa } from './ca.js';
-import {
-  DEFAULT_HASH_ALGORITHM,
-  DEFAULT_KEY_SIZE,
-  DEFAULT_VALIDITY_DAYS,
-} from './constants.js';
 import { getDigestForSigning } from './crypto.js';
+import {
+  CONFIG_KEY_DEFAULT_HASH_ALGORITHM,
+  CONFIG_KEY_DEFAULT_KEY_SIZE,
+  CONFIG_KEY_DEFAULT_VALIDITY_DAYS,
+  getConfigInt,
+  getConfigValue,
+} from './database.js';
 import type { PathHelpers } from './paths.js';
 
 export interface LeafCertificateOptions {
@@ -27,9 +29,10 @@ export function createLeafCertificate(
 ): number {
   const signer = getSignerCa(database, paths, issuerId);
 
-  const keySize = options.keySize ?? DEFAULT_KEY_SIZE;
-  const validityDays = options.validityDays ?? DEFAULT_VALIDITY_DAYS;
-  const hashAlgorithm = options.hashAlgorithm ?? DEFAULT_HASH_ALGORITHM;
+  const keySize = options.keySize ?? getConfigInt(database, CONFIG_KEY_DEFAULT_KEY_SIZE);
+  const validityDays = options.validityDays ?? getConfigInt(database, CONFIG_KEY_DEFAULT_VALIDITY_DAYS);
+  const hashAlgorithm =
+    options.hashAlgorithm ?? getConfigValue(database, CONFIG_KEY_DEFAULT_HASH_ALGORITHM) ?? 'sha256';
 
   const keys = forge.pki.rsa.generateKeyPair(keySize);
   const certificate = forge.pki.createCertificate();

@@ -1,7 +1,12 @@
 import type { Database } from 'bun:sqlite';
 import { existsSync } from 'node:fs';
 import { getValidationStatus } from './acme-validation-state.js';
-import { getActiveCaId } from './ca.js';
+import { getActiveAcmeIntermediateId, getActiveCaId } from './ca.js';
+import {
+  CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE,
+  CONFIG_KEY_DEFAULT_COMMON_NAME_ROOT,
+  getConfigValue,
+} from './database.js';
 import type { PathHelpers } from './paths.js';
 
 export interface SummaryData {
@@ -58,6 +63,10 @@ export interface SummaryData {
     isIntermediate: true;
   }>;
   acmeWhitelistDomains: Array<{ id: number; domain: string; createdAt: string | null }>;
+  acmeCaDomainAssignments: Array<{ domainPattern: string; caId: string }>;
+  activeAcmeIntermediateId: string | null;
+  defaultCommonNameRoot: string;
+  defaultCommonNameIntermediate: string;
 }
 
 export function getSummaryData(
@@ -102,6 +111,12 @@ export function getSummaryData(
   const acmeWhitelistDomains = database
     .prepare('SELECT id, domain, created_at AS createdAt FROM acme_whitelist_domains ORDER BY domain')
     .all() as Array<{ id: number; domain: string; createdAt: string | null }>;
+
+  const acmeCaDomainAssignments = database
+    .prepare('SELECT domain_pattern AS domainPattern, ca_id AS caId FROM acme_ca_domain_assignments ORDER BY domain_pattern')
+    .all() as Array<{ domainPattern: string; caId: string }>;
+
+  const activeAcmeIntermediateId = getActiveAcmeIntermediateId(database);
 
   const certificates = database.prepare(
     `SELECT c.id, c.domain, c.not_after, c.created_at, (c.pem IS NOT NULL) as has_pem, c.issuer_id, c.ca_certificate_id,
@@ -179,6 +194,11 @@ export function getSummaryData(
     isIntermediate: true as const,
   }));
 
+  const defaultCommonNameRoot =
+    getConfigValue(database, CONFIG_KEY_DEFAULT_COMMON_NAME_ROOT) ?? 'Meine CA';
+  const defaultCommonNameIntermediate =
+    getConfigValue(database, CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE) ?? 'Intermediate CA';
+
   return {
     summary: {
       certsTotal: certCountRow.count,
@@ -197,5 +217,9 @@ export function getSummaryData(
     cas,
     intermediates,
     acmeWhitelistDomains,
+    acmeCaDomainAssignments,
+    activeAcmeIntermediateId,
+    defaultCommonNameRoot,
+    defaultCommonNameIntermediate,
   };
 }

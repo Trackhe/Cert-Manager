@@ -20,6 +20,13 @@ export function createRequestHandler(
 
     logger.debug('request', { method, pathname, host: request.headers.get('host') ?? undefined });
 
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      database.prepare('INSERT INTO request_stats (date, count) VALUES (?, 1) ON CONFLICT(date) DO UPDATE SET count = count + 1').run(today);
+    } catch {
+      // ignore
+    }
+
     let response: Response;
 
     if (pathname.startsWith('/.well-known/acme-challenge/')) {

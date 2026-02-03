@@ -1,8 +1,4 @@
 import type { Database } from 'bun:sqlite';
-import {
-  DEFAULT_COMMON_NAME_INTERMEDIATE,
-  DEFAULT_COMMON_NAME_ROOT,
-} from './constants.js';
 import { htmlEscape, attrEscape, escapeForScript } from './escape.js';
 import type { PathHelpers } from './paths.js';
 import { getSummaryData } from './summary.js';
@@ -177,8 +173,15 @@ function renderCertTree(
 }
 
 export function renderDashboard(database: Database, paths: PathHelpers): Response {
-  const { summary, challenges, acmeChallenges, acmeValidationStatus, acmeWhitelistDomains, certificates, cas, intermediates } = getSummaryData(database, paths);
-  const initialData = { cas, intermediates, caConfigured: summary.caConfigured };
+  const { summary, challenges, acmeChallenges, acmeValidationStatus, acmeWhitelistDomains, acmeCaDomainAssignments, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate, certificates, cas, intermediates } = getSummaryData(database, paths);
+  const initialData = { cas, intermediates, certificates, caConfigured: summary.caConfigured, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate };
+  const getCaDisplayName = (caId: string): string => {
+    const root = cas.find((c) => c.id === caId);
+    if (root) return root.name + (root.commonName !== root.name ? ' (' + root.commonName + ')' : '');
+    const int = intermediates.find((c) => c.id === caId);
+    if (int) return (int.name || int.id) + ' (Intermediate)';
+    return caId;
+  };
   const initialDataJson = escapeForScript(JSON.stringify(initialData));
 
   const html = `<!DOCTYPE html>
@@ -193,6 +196,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       --gh-border: #d0d7de;
       --gh-accent: #0969da;
       --gh-accent-hover: #0550ae;
+      --gh-success: #1a7f37;
       --gh-danger: #cf222e;
       --gh-danger-hover: #a40e26;
       --gh-fg: #1f2328;
@@ -207,6 +211,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       --gh-border: #30363d;
       --gh-accent: #58a6ff;
       --gh-accent-hover: #79b8ff;
+      --gh-success: #3fb950;
       --gh-danger: #f85149;
       --gh-danger-hover: #ff7b72;
       --gh-fg: #c9d1d9;
@@ -257,10 +262,66 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       width: 1.25em;
       height: 1.25em;
     }
+    .app-layout {
+      display: flex;
+      min-height: calc(100vh - 53px);
+    }
+    .app-sidebar {
+      width: 200px;
+      flex-shrink: 0;
+      background: var(--gh-canvas-subtle);
+      border-right: 1px solid var(--gh-border);
+      padding: 16px 0;
+    }
+    .app-sidebar nav {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .app-sidebar .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 20px;
+      font-size: 14px;
+      color: var(--gh-fg);
+      text-decoration: none;
+      border: none;
+      background: none;
+      cursor: pointer;
+      text-align: left;
+      width: 100%;
+      font-family: inherit;
+    }
+    .app-sidebar .nav-link svg {
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      color: currentColor;
+    }
+    .app-sidebar .nav-link:hover {
+      background: var(--gh-btn-hover);
+    }
+    .app-sidebar .nav-link.active {
+      background: var(--gh-accent);
+      color: #fff;
+    }
+    .app-content {
+      flex: 1;
+      overflow: auto;
+      max-width: 1200px;
+      padding: 24px;
+    }
+    .dashboard-section {
+      display: none;
+    }
+    .dashboard-section.active {
+      display: block;
+    }
     main {
       max-width: 1340px;
       margin: 0 auto;
-      padding: 24px;
+      padding: 0;
     }
     .gh-card {
       background: var(--gh-canvas);
@@ -279,18 +340,20 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     .gh-card-body { padding: 16px; }
     .summary {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
       gap: 16px;
       margin-bottom: 24px;
+      max-width: 100%;
     }
     .summary-item {
       background: var(--gh-canvas);
       border: 1px solid var(--gh-border);
       border-radius: 6px;
       padding: 16px;
+      min-width: 0;
     }
     .summary-item dt { font-size: 12px; color: var(--gh-fg-muted); margin-bottom: 4px; font-weight: 400; }
-    .summary-item dd { margin: 0; font-weight: 600; font-size: 18px; }
+    .summary-item dd { margin: 0; font-weight: 600; font-size: 18px; overflow: hidden; text-overflow: ellipsis; }
     table { width: 100%; border-collapse: collapse; }
     th, td { padding: 8px 16px; text-align: left; border-bottom: 1px solid var(--gh-border); }
     th { background: var(--gh-canvas-subtle); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; color: var(--gh-fg-muted); }
@@ -384,11 +447,75 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     .acme-challenges-table .btn { padding: 2px 8px; font-size: 12px; }
     .gh-card-body input[type="text"] { padding: 5px 12px; font-size: 14px; border: 1px solid var(--gh-border); border-radius: 6px; font-family: inherit; background: var(--gh-canvas); color: var(--gh-fg); box-sizing: border-box; }
     .gh-card-body .acme-whitelist-form input[type="text"] { flex: 1; min-width: 0; }
+    .gh-card-body .acme-whitelist-form select { padding: 5px 12px; font-size: 14px; border: 1px solid var(--gh-border); border-radius: 6px; font-family: inherit; background: var(--gh-canvas); color: var(--gh-fg); min-width: 180px; box-sizing: border-box; }
     .acme-whitelist-table { width: 100%; }
     .acme-whitelist-table th:last-child, .acme-whitelist-table td:last-child { text-align: right; }
     .acme-whitelist-table .btn { padding: 2px 8px; font-size: 12px; }
     .btn-renew { background: var(--gh-accent); color: #fff; border-color: var(--gh-accent); }
     .btn-renew:hover { background: var(--gh-accent-hover); border-color: var(--gh-accent-hover); }
+    .log-terminal-wrap {
+      background: #0d1117;
+      border: 1px solid var(--gh-border);
+      border-radius: 6px;
+      padding: 12px;
+      max-height: 320px;
+      overflow: auto;
+    }
+    #section-log.dashboard-section.active {
+      display: flex;
+      flex-direction: column;
+      height: calc(100vh - 53px - 48px);
+      max-height: calc(100vh - 53px - 48px);
+      overflow: hidden;
+    }
+    #section-log.dashboard-section.active .gh-card {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #section-log.dashboard-section.active .gh-card-body {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #section-log.dashboard-section.active .gh-card-body > p {
+      flex-shrink: 0;
+    }
+    #section-log.dashboard-section.active .log-terminal-wrap {
+      flex: 1;
+      min-height: 0;
+      max-height: none;
+      overflow: auto;
+    }
+    .log-terminal {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      color: #7ee787;
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    html[data-theme="dark"] .log-terminal-wrap { background: #010409; border-color: #30363d; }
+    html[data-theme="dark"] .log-terminal { color: #7ee787; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .stats-charts { margin-top: 24px; max-width: 100%; }
+    .stats-chart-card { margin-bottom: 24px; min-width: 0; }
+    .stats-chart-card h3 { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: var(--gh-fg-muted); }
+    .stats-chart-wrap { background: var(--gh-canvas-subtle); border: 1px solid var(--gh-border); border-radius: 6px; padding: 12px; min-height: 200px; height: 200px; width: 100%; max-width: 100%; box-sizing: border-box; position: relative; }
+    .stats-chart-wrap canvas { display: block; width: 100% !important; height: 100% !important; }
+    .stats-chart-bar { fill: var(--gh-accent); }
+    .stats-chart-bar.revoked { fill: var(--gh-danger); }
+    .stats-chart-bar.requests { fill: var(--gh-fg-muted); }
+    .stats-chart-line { fill: none; stroke: var(--gh-accent); stroke-width: 2; }
+    .stats-chart-grid { stroke: var(--gh-border); stroke-width: 1; }
+    .stats-chart-empty { font-size: 13px; color: var(--gh-fg-muted); text-align: center; padding: 24px; }
+    .cert-honeycomb-wrap { margin-bottom: 24px; }
+    .cert-honeycomb-canvas { display: block; width: 100%; max-width: 100%; height: auto; border: 1px solid var(--gh-border); border-radius: 6px; background: var(--gh-canvas-subtle); }
   </style>
 </head>
 <body>
@@ -404,7 +531,34 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       </button>
     </div>
   </header>
-  <main>
+  <div class="app-layout">
+  <aside class="app-sidebar" aria-label="Navigation">
+    <nav>
+      <button type="button" class="nav-link active" data-section="overview" aria-current="page">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+        Übersicht
+      </button>
+      <button type="button" class="nav-link" data-section="acme">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        ACME & Challenges
+      </button>
+      <button type="button" class="nav-link" data-section="certificates">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h2"/><path d="M8 17h2"/><path d="M14 13h2"/><path d="M14 17h2"/></svg>
+        Zertifikate
+      </button>
+      <button type="button" class="nav-link" data-section="log">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        Log
+      </button>
+      <button type="button" class="nav-link" data-section="statistics">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        Statistiken
+      </button>
+    </nav>
+  </aside>
+  <main class="app-content">
+  <section id="section-overview" class="dashboard-section active" aria-labelledby="heading-overview">
+  <h2 id="heading-overview" class="sr-only">Übersicht</h2>
   <section class="summary">
     <div class="summary-item">
       <dt>Zertifikate gespeichert</dt>
@@ -423,7 +577,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       <dd id="timeLocal">${summary.timeLocal}</dd>
     </div>
     <div class="summary-item">
-      <dt>Let's Encrypt Account</dt>
+      <dt>ACME Client</dt>
       <dd id="letsEncryptEmail">${summary.letsEncrypt ? htmlEscape(summary.letsEncrypt.email) : 'coming soon'}</dd>
       <dt id="accountUrlLabel" style="margin-top:8px; display:${summary.letsEncrypt?.accountUrl ? 'block' : 'none'}">Account URL</dt>
       <dd id="letsEncryptUrl" style="word-break:break-all;font-size:0.9em">${summary.letsEncrypt?.accountUrl ? htmlEscape(summary.letsEncrypt.accountUrl) : ''}</dd>
@@ -434,6 +588,11 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     <div class="gh-card-header">Setup</div>
     <div class="gh-card-body">
   <div class="setup-grid">
+      <div class="setup-card">
+        <h3>ACME Client <span style="font-size:12px;font-weight:400;color:var(--gh-fg-muted)">(geplant)</span></h3>
+        <p>Der Cert-Manager soll künftig selbst als <strong>ACME-Client</strong> agieren – vergleichbar mit Certbot. Er würde per <strong>DNS-Challenge</strong> bei Let's Encrypt oder einem anderen ACME-Server Zertifikate anfordern, die Challenge erfüllen, das Zertifikat hier speichern und optional an Nginx Proxy Manager (NPM) ausliefern.</p>
+        <p>Ziel: NPM bezieht alle Zertifikate vom Cert-Manager; der Cert-Manager übernimmt Anforderung, Renewal und Auslieferung. Diese Funktion ist <strong>noch nicht implementiert</strong>.</p>
+      </div>
       <div class="setup-card">
         <h3>Eigene CA</h3>
         <div id="caNotConfigured">
@@ -461,187 +620,12 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     </div>
     </div>
   </div>
+  </section>
 
-  <div id="caModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="caModalTitle" onclick="if(event.target===this) closeModal('caModal')">
-    <div class="modal" onclick="event.stopPropagation()">
-      <h3 id="caModalTitle">Root-CA erstellen</h3>
-      <form id="caSetupForm" onsubmit="submitCaSetup(event); return false;">
-        <label>Name (für die Liste)</label>
-        <input type="text" name="name" placeholder="z. B. Meine CA" required>
-        <label>Common Name (CN)</label>
-        <input type="text" name="commonName" value="${htmlEscape(DEFAULT_COMMON_NAME_ROOT)}" placeholder="z. B. Meine CA" required>
-        <label>Organisation (O)</label>
-        <input type="text" name="organization" placeholder="optional">
-        <label>Organisationseinheit (OU)</label>
-        <input type="text" name="organizationalUnit" placeholder="optional">
-        <label>Land (C)</label>
-        <input type="text" name="country" placeholder="z. B. DE" maxlength="2">
-        <label>Ort (L)</label>
-        <input type="text" name="locality" placeholder="optional">
-        <label>Bundesland (ST)</label>
-        <input type="text" name="stateOrProvince" placeholder="optional">
-        <label>E-Mail</label>
-        <input type="email" name="email" placeholder="optional">
-        <label>Gültigkeit (Jahre)</label>
-        <input type="number" name="validityYears" value="10" min="1" max="30">
-        <label>Schlüssellänge</label>
-        <select name="keySize">
-          <option value="2048">2048 Bit</option>
-          <option value="4096">4096 Bit</option>
-        </select>
-        <label>Hash-Algorithmus</label>
-        <select name="hashAlgo">
-          <option value="sha256">SHA-256</option>
-          <option value="sha384">SHA-384</option>
-          <option value="sha512">SHA-512</option>
-        </select>
-        <div class="modal-actions">
-          <button type="button" class="btn btn-secondary" onclick="closeModal('caModal')">Abbrechen</button>
-          <button type="submit" class="btn" id="caSubmitBtn">CA erstellen</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <div id="intermediateModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="intermediateModalTitle" onclick="if(event.target===this) closeModal('intermediateModal')">
-    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px">
-      <h3 id="intermediateModalTitle">Intermediate-CA erstellen</h3>
-      <p style="margin-bottom:12px;font-size:0.9em;color:#555">Die Intermediate-CA wird von der gewählten Root-CA signiert.</p>
-      <form id="intermediateSetupForm" onsubmit="submitIntermediateSetup(event); return false;">
-        <label>Parent-CA (ausstellende Root-CA)</label>
-        <select name="parentCaId" id="intermediateParentSelect" required style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
-          <option value="">– Bitte wählen –</option>
-        </select>
-        <label>Name (für die Liste)</label>
-        <input type="text" name="name" placeholder="z. B. Meine Intermediate CA" required>
-        <label>Common Name (CN)</label>
-        <input type="text" name="commonName" value="${htmlEscape(DEFAULT_COMMON_NAME_INTERMEDIATE)}" placeholder="z. B. Intermediate CA" required>
-        <label>Organisation (O)</label>
-        <input type="text" name="organization" placeholder="optional">
-        <label>Organisationseinheit (OU)</label>
-        <input type="text" name="organizationalUnit" placeholder="optional">
-        <label>Land (C)</label>
-        <input type="text" name="country" placeholder="z. B. DE" maxlength="2">
-        <label>Ort (L)</label>
-        <input type="text" name="locality" placeholder="optional">
-        <label>Bundesland (ST)</label>
-        <input type="text" name="stateOrProvince" placeholder="optional">
-        <label>E-Mail</label>
-        <input type="email" name="email" placeholder="optional">
-        <label>Gültigkeit (Jahre)</label>
-        <input type="number" name="validityYears" value="10" min="1" max="30">
-        <label>Schlüssellänge</label>
-        <select name="keySize">
-          <option value="2048">2048 Bit</option>
-          <option value="4096">4096 Bit</option>
-        </select>
-        <label>Hash-Algorithmus</label>
-        <select name="hashAlgo">
-          <option value="sha256">SHA-256</option>
-          <option value="sha384">SHA-384</option>
-          <option value="sha512">SHA-512</option>
-        </select>
-        <div class="modal-actions">
-          <button type="button" class="btn btn-secondary" onclick="closeModal('intermediateModal')">Abbrechen</button>
-          <button type="submit" class="btn" id="intermediateSubmitBtn">Intermediate-CA erstellen</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <div id="certViewModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certViewModalTitle" onclick="if(event.target===this) closeModal('certViewModal')">
-    <div class="modal cert-view-modal" onclick="event.stopPropagation()" style="max-width:560px">
-      <h3 id="certViewModalTitle">Zertifikat-Details</h3>
-      <dl id="certViewDl" style="display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0 0 16px;font-size:14px">
-        <dt class="cert-view-cert-only" style="color:var(--gh-fg-muted);margin:0">Domain</dt>
-        <dd class="cert-view-cert-only" style="margin:0" id="certViewDomain">—</dd>
-        <dt class="cert-view-ca-only" style="color:var(--gh-fg-muted);margin:0;display:none">Typ</dt>
-        <dd class="cert-view-ca-only" style="margin:0;display:none" id="certViewType">—</dd>
-        <dt class="cert-view-ca-only" style="color:var(--gh-fg-muted);margin:0;display:none">Name</dt>
-        <dd class="cert-view-ca-only" style="margin:0;display:none" id="certViewName">—</dd>
-        <dt class="cert-view-ca-only" style="color:var(--gh-fg-muted);margin:0;display:none">Common Name</dt>
-        <dd class="cert-view-ca-only" style="margin:0;display:none" id="certViewCommonName">—</dd>
-        <dt class="cert-view-ca-only cert-view-int-only" style="color:var(--gh-fg-muted);margin:0;display:none">Übergeordnete CA</dt>
-        <dd class="cert-view-ca-only cert-view-int-only" style="margin:0;display:none" id="certViewParentCa">—</dd>
-        <dt style="color:var(--gh-fg-muted);margin:0">Subject</dt>
-        <dd style="margin:0" id="certViewSubject">—</dd>
-        <dt style="color:var(--gh-fg-muted);margin:0">Issuer</dt>
-        <dd style="margin:0" id="certViewIssuer">—</dd>
-        <dt style="color:var(--gh-fg-muted);margin:0">Seriennummer</dt>
-        <dd style="margin:0" id="certViewSerial">—</dd>
-        <dt style="color:var(--gh-fg-muted);margin:0">Gültig von</dt>
-        <dd style="margin:0" id="certViewNotBefore">—</dd>
-        <dt style="color:var(--gh-fg-muted);margin:0">Gültig bis</dt>
-        <dd style="margin:0" id="certViewNotAfter">—</dd>
-        <dt style="color:var(--gh-fg-muted);margin:0">Fingerprint (SHA-256)</dt>
-        <dd style="margin:0" id="certViewFingerprint">—</dd>
-        <dt class="cert-view-cert-only" style="color:var(--gh-fg-muted);margin:0">Subject Alt Names</dt>
-        <dd class="cert-view-cert-only" style="margin:0" id="certViewSan">—</dd>
-        <dt style="color:var(--gh-fg-muted);margin:0">Erstellt am</dt>
-        <dd style="margin:0" id="certViewCreatedAt">—</dd>
-        <dt style="color:var(--gh-fg-muted);margin:0">ID</dt>
-        <dd style="margin:0" id="certViewId">—</dd>
-      </dl>
-      <p style="margin:0 0 6px;font-size:13px;color:var(--gh-fg-muted)">Zertifikat (PEM)</p>
-      <pre id="certViewPem" style="margin:0;padding:12px;background:var(--gh-canvas-subtle);border:1px solid var(--gh-border);border-radius:6px;font-size:11px;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-all">—</pre>
-      <div id="certViewDownloads" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"></div>
-      <div class="modal-actions" style="margin-top:16px">
-        <button type="button" class="btn btn-secondary" onclick="closeModal('certViewModal')">Schließen</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="certCreateModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certCreateModalTitle" onclick="if(event.target===this) closeModal('certCreateModal')">
-    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px">
-      <h3 id="certCreateModalTitle">Zertifikat erstellen</h3>
-      <form id="certCreateForm" onsubmit="submitCertCreate(event); return false;">
-        <label>Ausstellende CA</label>
-        <select name="issuerId" id="certCreateCaSelect" required style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
-          <option value="">– Bitte wählen –</option>
-        </select>
-        <label>Domain (CN / erste SAN)</label>
-        <input type="text" name="domain" id="certCreateDomain" placeholder="z. B. example.com" required style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
-        <label>Weitere Domains (SAN, kommagetrennt, optional)</label>
-        <input type="text" name="sanDomains" id="certCreateSan" placeholder="www.example.com, api.example.com" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
-        <label>Gültigkeit (Tage)</label>
-        <input type="number" name="validityDays" value="365" min="1" max="825" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
-        <label>Schlüssellänge</label>
-        <select name="keySize" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
-          <option value="2048">2048 Bit</option>
-          <option value="4096">4096 Bit</option>
-        </select>
-        <label>Hash-Algorithmus</label>
-        <select name="hashAlgo" style="width:100%;padding:8px;margin-bottom:16px;box-sizing:border-box">
-          <option value="sha256">SHA-256</option>
-          <option value="sha384">SHA-384</option>
-          <option value="sha512">SHA-512</option>
-        </select>
-        <div id="certCreateSuccess" style="display:none;margin-bottom:12px;padding:12px;background:#e8f5e9;border-radius:6px;font-size:0.9em">
-          <strong>Zertifikat erstellt.</strong>
-          <p style="margin:8px 0 0 0"><a href="#" id="certCreateDownloadCert" class="btn" style="padding:4px 8px;font-size:0.85rem" download>Zertifikat herunterladen</a>
-          <a href="#" id="certCreateDownloadKey" class="btn" style="padding:4px 8px;font-size:0.85rem;margin-left:4px" download>Schlüssel herunterladen</a></p>
-        </div>
-        <div class="modal-actions">
-          <button type="button" class="btn btn-secondary" onclick="closeModal('certCreateModal')">Abbrechen</button>
-          <button type="submit" class="btn" id="certCreateSubmitBtn">Zertifikat erstellen</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <div id="certRenewModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certRenewModalTitle" onclick="if(event.target===this) closeModal('certRenewModal')">
-    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px">
-      <h3 id="certRenewModalTitle">Zertifikat erneuern</h3>
-      <p id="certRenewModalText" style="margin:0 0 16px;font-size:14px">Zertifikat für <strong id="certRenewDomain"></strong> erneuern? Das bestehende Zertifikat wird widerrufen und ein neues ausgestellt.</p>
-      <div class="modal-actions">
-        <button type="button" class="btn btn-secondary" onclick="closeModal('certRenewModal')">Abbrechen</button>
-        <button type="button" class="btn" id="certRenewConfirmBtn">Erneuern</button>
-      </div>
-    </div>
-  </div>
-
+  <section id="section-acme" class="dashboard-section" aria-labelledby="heading-acme">
+  <h2 id="heading-acme" class="sr-only">ACME & Challenges</h2>
   <div class="gh-card">
-    <div class="gh-card-header">Challenges</div>
+    <div class="gh-card-header">ACME Client</div>
     <div class="gh-card-body">
   <table>
     <thead><tr><th>Token</th><th>Domain</th><th>Läuft ab</th><th></th></tr></thead>
@@ -716,9 +700,9 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
   <div class="gh-card">
     <div class="gh-card-header">Domains ohne HTTP-Challenge (Whitelist)</div>
     <div class="gh-card-body">
-  <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Domains oder Adressen, für die die ACME HTTP-01-Challenge automatisch als gültig akzeptiert wird. Nützlich im lokalen Netz. Mit <code>*.</code> (z. B. <code>*.trackhe.local</code>) werden alle Subdomains akzeptiert.</p>
+  <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Domains oder Adressen, für die die ACME HTTP-01-Challenge automatisch als gültig akzeptiert wird. Nützlich im lokalen Netz. Mit <code>*.</code> (z. B. <code>*.example.com</code>) werden alle Subdomains akzeptiert.</p>
   <form id="acmeWhitelistForm" class="acme-whitelist-form" style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
-    <input type="text" id="acmeWhitelistDomain" name="domain" placeholder="z. B. test2.example.com, *.trackhe.local">
+    <input type="text" id="acmeWhitelistDomain" name="domain" placeholder="z. B. test2.example.com, *.example.com">
     <button type="submit" class="btn">Hinzufügen</button>
   </form>
   <table class="acme-whitelist-table">
@@ -740,18 +724,333 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
   </div>
 
   <div class="gh-card">
+    <div class="gh-card-header">CA pro Domain (ACME)</div>
+    <div class="gh-card-body">
+  <p style="margin:0 0 8px;font-size:13px;color:var(--gh-fg-muted)">Standard-Intermediate für ACME: Wird verwendet, wenn keine Domain-Zuordnung passt.</p>
+  <form id="acmeDefaultIntermediateForm" class="acme-whitelist-form" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:16px;">
+    <select id="acmeDefaultIntermediateSelect" name="intermediate_id" class="acme-ca-assignment-select" style="min-width:220px">
+      <option value="">– Keine (erste Intermediate der aktiven Root) –</option>
+      ${intermediates.map((c) => '<option value="' + attrEscape(c.id) + '"' + (activeAcmeIntermediateId === c.id ? ' selected' : '') + '>' + htmlEscape(c.name || c.id) + '</option>').join('')}
+    </select>
+    <button type="submit" class="btn">Als Standard setzen</button>
+  </form>
+  <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Domain-Zuordnung: Bei ACME-Anfragen wird für die angegebene Domain (oder Wildcard) die gewählte CA statt der Standard-CA verwendet. Unterstützt exakte Domains und <code>*.</code> (z. B. <code>*.example.com</code>).</p>
+  <form id="acmeCaAssignmentsForm" class="acme-whitelist-form" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;">
+    <input type="text" id="acmeCaAssignmentPattern" name="domain_pattern" placeholder="z. B. example.com oder *.example.com" style="min-width:200px">
+    <select id="acmeCaAssignmentCa" name="ca_id" class="acme-ca-assignment-select">
+      <option value="">– Intermediate-CA wählen –</option>
+      ${intermediates.map((c) => '<option value="' + attrEscape(c.id) + '">' + htmlEscape(c.name || c.id) + '</option>').join('')}
+    </select>
+    <button type="submit" class="btn">Hinzufügen</button>
+  </form>
+  <table class="acme-whitelist-table">
+    <thead><tr><th>Domain / Muster</th><th>CA</th><th></th></tr></thead>
+    <tbody id="acmeCaAssignments">${acmeCaDomainAssignments.length === 0
+      ? '<tr><td colspan="3" class="empty-table">Keine Zuordnungen. Standard-CA wird verwendet.</td></tr>'
+      : acmeCaDomainAssignments
+          .map(
+            (a) => `
+      <tr data-pattern="${attrEscape(a.domainPattern)}">
+        <td><code>${htmlEscape(a.domainPattern)}</code></td>
+        <td>${htmlEscape(getCaDisplayName(a.caId))}</td>
+        <td><button type="button" class="btn btn-delete btn-delete-acme-ca-assignment" data-pattern="${attrEscape(a.domainPattern)}" title="Zuordnung löschen">Löschen</button></td>
+      </tr>
+    `
+          )
+          .join('')}</tbody>
+  </table>
+    </div>
+  </div>
+  </section>
+
+  <section id="section-certificates" class="dashboard-section" aria-labelledby="heading-certificates">
+  <h2 id="heading-certificates" class="sr-only">Zertifikate</h2>
+  <div class="gh-card">
     <div class="gh-card-header">Zertifikate</div>
     <div class="gh-card-body">
   <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Hierarchie wie in XCA: Root-CAs, darunter Intermediate-CAs und ausgestellte Zertifikate.</p>
+  <div class="cert-honeycomb-wrap" aria-hidden="false">
+    <p style="margin:0 0 8px;font-size:12px;color:var(--gh-fg-muted)">Honeycomb: jede Kachel = ein Zertifikat bzw. eine CA (dunkel = CA, hell = Zertifikate um die CA).</p>
+    <canvas id="certHoneycombCanvas" class="cert-honeycomb-canvas" width="800" height="360" role="img" aria-label="Zertifikate-Honeycomb"></canvas>
+  </div>
   <ul id="certTree" class="cert-tree">${renderCertTree(certificates, cas, intermediates, htmlEscape, attrEscape)}</ul>
     </div>
   </div>
+  </section>
+
+  <section id="section-log" class="dashboard-section" aria-labelledby="heading-log">
+  <h2 id="heading-log" class="sr-only">Log</h2>
+  <div class="gh-card">
+    <div class="gh-card-header">Log</div>
+    <div class="gh-card-body">
+  <p style="margin:0 0 12px;font-size:13px;color:var(--gh-fg-muted)">Server-Log (Terminal-Ausgabe). Aktualisiert sich live.</p>
+  <div class="log-terminal-wrap">
+    <pre id="logTerminal" class="log-terminal" aria-live="polite">Lade…</pre>
+  </div>
+    </div>
+  </div>
+  </section>
+
+  <section id="section-statistics" class="dashboard-section" aria-labelledby="heading-statistics">
+  <h2 id="heading-statistics" class="sr-only">Statistiken</h2>
+  <div class="gh-card">
+    <div class="gh-card-header">Statistiken</div>
+    <div class="gh-card-body">
+  <p style="margin:0 0 16px;font-size:13px;color:var(--gh-fg-muted)">Überblick über Zertifikate, CAs und ACME. Weitere Darstellungen können hier ergänzt werden.</p>
+  <div class="summary" id="statsSummary">
+    <div class="summary-item">
+      <dt>Zertifikate gesamt</dt>
+      <dd id="statsCertsTotal">—</dd>
+    </div>
+    <div class="summary-item">
+      <dt>Zertifikate gültig</dt>
+      <dd id="statsCertsValid">—</dd>
+    </div>
+    <div class="summary-item">
+      <dt>Zertifikate abgelaufen</dt>
+      <dd id="statsCertsExpired">—</dd>
+    </div>
+    <div class="summary-item">
+      <dt>Zertifikate widerrufen</dt>
+      <dd id="statsCertsRevoked">—</dd>
+    </div>
+    <div class="summary-item">
+      <dt>Root-CAs</dt>
+      <dd id="statsRootCas">—</dd>
+    </div>
+    <div class="summary-item">
+      <dt>Intermediate-CAs</dt>
+      <dd id="statsIntermediates">—</dd>
+    </div>
+    <div class="summary-item">
+      <dt>ACME-Challenges / Whitelist</dt>
+      <dd id="statsAcmeChallenges">—</dd>
+    </div>
+    <div class="summary-item">
+      <dt>Whitelist-Einträge</dt>
+      <dd id="statsWhitelist">—</dd>
+    </div>
+  </div>
+  <div class="stats-charts" id="statsCharts">
+    <div class="stats-chart-card">
+      <h3>HTTP-Anfragen pro Tag</h3>
+      <div class="stats-chart-wrap" id="chartRequests" aria-hidden="true"></div>
+    </div>
+    <div class="stats-chart-card">
+      <h3>Zertifikate erstellt pro Tag</h3>
+      <div class="stats-chart-wrap" id="chartCertsCreated" aria-hidden="true"></div>
+    </div>
+    <div class="stats-chart-card">
+      <h3>Zertifikate widerrufen pro Tag</h3>
+      <div class="stats-chart-wrap" id="chartCertsRevoked" aria-hidden="true"></div>
+    </div>
+    <div class="stats-chart-card">
+      <h3>Zertifikate erneuert pro Tag</h3>
+      <div class="stats-chart-wrap" id="chartCertsRenewed" aria-hidden="true"></div>
+    </div>
+    <div class="stats-chart-card">
+      <h3>ACME-Bestellungen pro Tag</h3>
+      <div class="stats-chart-wrap" id="chartAcmeOrders" aria-hidden="true"></div>
+    </div>
+    <div class="stats-chart-card">
+      <h3>Zertifikate gesamt (Verlauf)</h3>
+      <div class="stats-chart-wrap" id="chartCertsTotal" aria-hidden="true"></div>
+    </div>
+  </div>
+    </div>
+  </div>
+  </section>
 
   </main>
+  </div>
+
+  <div id="caModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="caModalTitle" onclick="if(event.target===this) closeModal('caModal')">
+    <div class="modal" onclick="event.stopPropagation()">
+      <h3 id="caModalTitle">Root-CA erstellen</h3>
+      <form id="caSetupForm" onsubmit="submitCaSetup(event); return false;">
+        <label>Name (für die Liste)</label>
+        <input type="text" name="name" placeholder="z. B. Meine CA" required>
+        <label>Common Name (CN)</label>
+        <input type="text" name="commonName" value="${htmlEscape(defaultCommonNameRoot)}" placeholder="z. B. Meine CA" required>
+        <label>Organisation (O)</label>
+        <input type="text" name="organization" placeholder="optional">
+        <label>Organisationseinheit (OU)</label>
+        <input type="text" name="organizationalUnit" placeholder="optional">
+        <label>Land (C)</label>
+        <input type="text" name="country" placeholder="z. B. DE" maxlength="2">
+        <label>Ort (L)</label>
+        <input type="text" name="locality" placeholder="optional">
+        <label>Bundesland (ST)</label>
+        <input type="text" name="stateOrProvince" placeholder="optional">
+        <label>E-Mail</label>
+        <input type="email" name="email" placeholder="optional">
+        <label>Gültigkeit (Jahre)</label>
+        <input type="number" name="validityYears" value="10" min="1" max="30">
+        <label>Schlüssellänge</label>
+        <select name="keySize">
+          <option value="2048">2048 Bit</option>
+          <option value="4096">4096 Bit</option>
+        </select>
+        <label>Hash-Algorithmus</label>
+        <select name="hashAlgo">
+          <option value="sha256">SHA-256</option>
+          <option value="sha384">SHA-384</option>
+          <option value="sha512">SHA-512</option>
+        </select>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('caModal')">Abbrechen</button>
+          <button type="submit" class="btn" id="caSubmitBtn">CA erstellen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="intermediateModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="intermediateModalTitle" onclick="if(event.target===this) closeModal('intermediateModal')">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px">
+      <h3 id="intermediateModalTitle">Intermediate-CA erstellen</h3>
+      <p style="margin-bottom:12px;font-size:0.9em;color:#555">Die Intermediate-CA wird von der gewählten Root-CA signiert.</p>
+      <form id="intermediateSetupForm" onsubmit="submitIntermediateSetup(event); return false;">
+        <label>Parent-CA (ausstellende Root-CA)</label>
+        <select name="parentCaId" id="intermediateParentSelect" required style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+          <option value="">– Bitte wählen –</option>
+        </select>
+        <label>Name (für die Liste)</label>
+        <input type="text" name="name" placeholder="z. B. Meine Intermediate CA" required>
+        <label>Common Name (CN)</label>
+        <input type="text" name="commonName" value="${htmlEscape(defaultCommonNameIntermediate)}" placeholder="z. B. Intermediate CA" required>
+        <label>Organisation (O)</label>
+        <input type="text" name="organization" placeholder="optional">
+        <label>Organisationseinheit (OU)</label>
+        <input type="text" name="organizationalUnit" placeholder="optional">
+        <label>Land (C)</label>
+        <input type="text" name="country" placeholder="z. B. DE" maxlength="2">
+        <label>Ort (L)</label>
+        <input type="text" name="locality" placeholder="optional">
+        <label>Bundesland (ST)</label>
+        <input type="text" name="stateOrProvince" placeholder="optional">
+        <label>E-Mail</label>
+        <input type="email" name="email" placeholder="optional">
+        <label>Gültigkeit (Jahre)</label>
+        <input type="number" name="validityYears" value="10" min="1" max="30">
+        <label>Schlüssellänge</label>
+        <select name="keySize">
+          <option value="2048">2048 Bit</option>
+          <option value="4096">4096 Bit</option>
+        </select>
+        <label>Hash-Algorithmus</label>
+        <select name="hashAlgo">
+          <option value="sha256">SHA-256</option>
+          <option value="sha384">SHA-384</option>
+          <option value="sha512">SHA-512</option>
+        </select>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('intermediateModal')">Abbrechen</button>
+          <button type="submit" class="btn" id="intermediateSubmitBtn">Intermediate-CA erstellen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="certViewModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certViewModalTitle" onclick="if(event.target===this) closeModal('certViewModal')">
+    <div class="modal cert-view-modal" onclick="event.stopPropagation()" style="max-width:560px">
+      <h3 id="certViewModalTitle">Zertifikat-Details</h3>
+      <dl id="certViewDl" style="display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0 0 16px;font-size:14px">
+        <dt class="cert-view-cert-only" style="color:var(--gh-fg-muted);margin:0">Domain</dt>
+        <dd class="cert-view-cert-only" style="margin:0" id="certViewDomain">—</dd>
+        <dt class="cert-view-ca-only" style="color:var(--gh-fg-muted);margin:0;display:none">Typ</dt>
+        <dd class="cert-view-ca-only" style="margin:0;display:none" id="certViewType">—</dd>
+        <dt class="cert-view-ca-only" style="color:var(--gh-fg-muted);margin:0;display:none">Name</dt>
+        <dd class="cert-view-ca-only" style="margin:0;display:none" id="certViewName">—</dd>
+        <dt class="cert-view-ca-only" style="color:var(--gh-fg-muted);margin:0;display:none">Common Name</dt>
+        <dd class="cert-view-ca-only" style="margin:0;display:none" id="certViewCommonName">—</dd>
+        <dt class="cert-view-ca-only cert-view-int-only" style="color:var(--gh-fg-muted);margin:0;display:none">Übergeordnete CA</dt>
+        <dd class="cert-view-ca-only cert-view-int-only" style="margin:0;display:none" id="certViewParentCa">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Subject</dt>
+        <dd style="margin:0" id="certViewSubject">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Issuer</dt>
+        <dd style="margin:0" id="certViewIssuer">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Seriennummer</dt>
+        <dd style="margin:0" id="certViewSerial">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Gültig von</dt>
+        <dd style="margin:0" id="certViewNotBefore">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Gültig bis</dt>
+        <dd style="margin:0" id="certViewNotAfter">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Fingerprint (SHA-256)</dt>
+        <dd style="margin:0" id="certViewFingerprint">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Schlüsseltyp</dt>
+        <dd style="margin:0" id="certViewKeyType">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Schlüssel</dt>
+        <dd style="margin:0" id="certViewKeyInfo">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Signaturalgorithmus</dt>
+        <dd style="margin:0" id="certViewSignatureAlgorithm">—</dd>
+        <dt class="cert-view-cert-only" style="color:var(--gh-fg-muted);margin:0">Subject Alt Names</dt>
+        <dd class="cert-view-cert-only" style="margin:0" id="certViewSan">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">Erstellt am</dt>
+        <dd style="margin:0" id="certViewCreatedAt">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">ID</dt>
+        <dd style="margin:0" id="certViewId">—</dd>
+      </dl>
+      <p style="margin:0 0 6px;font-size:13px;color:var(--gh-fg-muted)">Zertifikat (PEM)</p>
+      <pre id="certViewPem" style="margin:0;padding:12px;background:var(--gh-canvas-subtle);border:1px solid var(--gh-border);border-radius:6px;font-size:11px;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-all">—</pre>
+      <div id="certViewDownloads" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"></div>
+      <div class="modal-actions" style="margin-top:16px">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('certViewModal')">Schließen</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="certCreateModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certCreateModalTitle" onclick="if(event.target===this) closeModal('certCreateModal')">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px">
+      <h3 id="certCreateModalTitle">Zertifikat erstellen</h3>
+      <form id="certCreateForm" onsubmit="submitCertCreate(event); return false;">
+        <label>Ausstellende CA</label>
+        <select name="issuerId" id="certCreateCaSelect" required style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+          <option value="">– Bitte wählen –</option>
+        </select>
+        <label>Domain (CN / erste SAN)</label>
+        <input type="text" name="domain" id="certCreateDomain" placeholder="z. B. example.com" required style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+        <label>Weitere Domains (SAN, kommagetrennt, optional)</label>
+        <input type="text" name="sanDomains" id="certCreateSan" placeholder="www.example.com, api.example.com" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+        <label>Gültigkeit (Tage)</label>
+        <input type="number" name="validityDays" value="365" min="1" max="825" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+        <label>Schlüssellänge</label>
+        <select name="keySize" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+          <option value="2048">2048 Bit</option>
+          <option value="4096">4096 Bit</option>
+        </select>
+        <label>Hash-Algorithmus</label>
+        <select name="hashAlgo" style="width:100%;padding:8px;margin-bottom:16px;box-sizing:border-box">
+          <option value="sha256">SHA-256</option>
+          <option value="sha384">SHA-384</option>
+          <option value="sha512">SHA-512</option>
+        </select>
+        <div id="certCreateSuccess" style="display:none;margin-bottom:12px;padding:12px;background:#e8f5e9;border-radius:6px;font-size:0.9em">
+          <strong>Zertifikat erstellt.</strong>
+          <p style="margin:8px 0 0 0"><a href="#" id="certCreateDownloadCert" class="btn" style="padding:4px 8px;font-size:0.85rem" download>Zertifikat herunterladen</a>
+          <a href="#" id="certCreateDownloadKey" class="btn" style="padding:4px 8px;font-size:0.85rem;margin-left:4px" download>Schlüssel herunterladen</a></p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('certCreateModal')">Abbrechen</button>
+          <button type="submit" class="btn" id="certCreateSubmitBtn">Zertifikat erstellen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="certRenewModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certRenewModalTitle" onclick="if(event.target===this) closeModal('certRenewModal')">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:420px">
+      <h3 id="certRenewModalTitle">Zertifikat erneuern</h3>
+      <p id="certRenewModalText" style="margin:0 0 16px;font-size:14px">Zertifikat für <strong id="certRenewDomain"></strong> erneuern? Das bestehende Zertifikat wird widerrufen und ein neues ausgestellt.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('certRenewModal')">Abbrechen</button>
+        <button type="button" class="btn" id="certRenewConfirmBtn">Erneuern</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script type="application/json" id="initialData">${initialDataJson}</script>
   <script>
-    var initialData = { cas: [], intermediates: [], caConfigured: false };
-    try { initialData = JSON.parse(document.getElementById('initialData').textContent); } catch (e) {}
     (function themeInit() {
       var stored = localStorage.getItem('theme');
       var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
@@ -774,6 +1073,161 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         updateThemeIcons();
       });
     })();
+    var initialData = { cas: [], intermediates: [], caConfigured: false };
+    try { var idEl = document.getElementById('initialData'); if (idEl && idEl.textContent) initialData = JSON.parse(idEl.textContent); } catch (e) {}
+    var resizeAndDrawHoneycomb = function() {};
+    (function navInit() {
+      var STORAGE_KEY = 'cert-manager-section';
+      function showSection(sectionId) {
+        document.querySelectorAll('.dashboard-section').forEach(function(el) { el.classList.remove('active'); });
+        document.querySelectorAll('.app-sidebar .nav-link').forEach(function(el) {
+          el.classList.remove('active');
+          el.removeAttribute('aria-current');
+        });
+        var section = document.getElementById('section-' + sectionId);
+        var link = document.querySelector('.app-sidebar .nav-link[data-section="' + sectionId + '"]');
+        if (section) section.classList.add('active');
+        if (link) { link.classList.add('active'); link.setAttribute('aria-current', 'page'); }
+        try { localStorage.setItem(STORAGE_KEY, sectionId); } catch (e) {}
+        if (sectionId === 'certificates' && typeof resizeAndDrawHoneycomb === 'function') {
+          requestAnimationFrame(function() { resizeAndDrawHoneycomb(); });
+        }
+      }
+      var saved = '';
+      try { saved = localStorage.getItem(STORAGE_KEY) || ''; } catch (e) {}
+      var valid = ['overview', 'acme', 'certificates', 'log', 'statistics'].indexOf(saved) >= 0;
+      if (valid) showSection(saved); else showSection('overview');
+      if (valid && saved === 'statistics' && typeof loadStatsCharts === 'function') try { loadStatsCharts(); } catch (e) {}
+      document.querySelectorAll('.app-sidebar .nav-link').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var id = this.getAttribute('data-section');
+          if (id) {
+            showSection(id);
+            if (id === 'statistics') loadStatsCharts();
+          }
+        });
+      });
+    })();
+    var statsChartsLoaded = false;
+    function getLastDays(n) {
+      var out = [];
+      for (var i = n - 1; i >= 0; i--) {
+        var d = new Date();
+        d.setDate(d.getDate() - i);
+        out.push(d.toISOString().slice(0, 10));
+      }
+      return out;
+    }
+    function mapToDays(daysArr, dataArr) {
+      var map = {};
+      (dataArr || []).forEach(function(o) { map[o.date] = o.count; });
+      return daysArr.map(function(date) { return { date: date, count: map[date] || 0 }; });
+    }
+    var statsChartInstances = {};
+    function getChartColor(cssVar, fallback) {
+      try {
+        var val = getComputedStyle(document.documentElement).getPropertyValue(cssVar).trim();
+        if (val) return val;
+      } catch (e) {}
+      return fallback || '#0969da';
+    }
+    function createBarChart(containerId, data, colorKey) {
+      var wrap = document.getElementById(containerId);
+      if (!wrap || typeof Chart === 'undefined') return;
+      try {
+        wrap.innerHTML = '';
+        var canvas = document.createElement('canvas');
+        wrap.appendChild(canvas);
+        var color = colorKey === 'requests' ? getChartColor('--gh-fg-muted', '#6e7781') : colorKey === 'revoked' ? getChartColor('--gh-danger', '#cf222e') : colorKey === 'renewed' ? getChartColor('--gh-success', '#1a7f37') : getChartColor('--gh-accent', '#0969da');
+        var labels = data.map(function(d) { return d.date.slice(5); });
+        var values = data.map(function(d) { return d.count; });
+        var chart = new Chart(canvas, {
+          type: 'bar',
+          data: { labels: labels, datasets: [{ label: '', data: values, backgroundColor: color, borderColor: color, borderWidth: 1 }] },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { ticks: { maxRotation: 45, maxTicksLimit: 14, font: { size: 10 } }, grid: { display: false } },
+              y: { beginAtZero: true, ticks: { stepSize: 1 }, grid: { color: 'var(--gh-border)' } }
+            }
+          }
+        });
+        statsChartInstances[containerId] = chart;
+      } catch (err) {
+        wrap.innerHTML = '<p class="stats-chart-empty">Diagramm konnte nicht geladen werden</p>';
+      }
+    }
+    function createLineChart(containerId, data) {
+      var wrap = document.getElementById(containerId);
+      if (!wrap || typeof Chart === 'undefined') return;
+      if (data.length < 2) {
+        wrap.innerHTML = '<p class="stats-chart-empty">Nicht genug Daten für Verlauf</p>';
+        return;
+      }
+      try {
+        wrap.innerHTML = '';
+        var canvas = document.createElement('canvas');
+        wrap.appendChild(canvas);
+        var color = getChartColor('--gh-accent', '#0969da');
+        var labels = data.map(function(d) { return d.date.slice(5); });
+        var values = data.map(function(d) { return d.count; });
+        var chart = new Chart(canvas, {
+          type: 'line',
+          data: { labels: labels, datasets: [{ label: 'Gesamt', data: values, borderColor: color, backgroundColor: color + '20', fill: true, tension: 0.2, pointRadius: 2 }] },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              x: { ticks: { maxRotation: 45, maxTicksLimit: 14, font: { size: 10 } }, grid: { display: false } },
+              y: { beginAtZero: true, ticks: { stepSize: 1 }, grid: { color: 'var(--gh-border)' } }
+            }
+          }
+        });
+        statsChartInstances[containerId] = chart;
+      } catch (err) {
+        wrap.innerHTML = '<p class="stats-chart-empty">Diagramm konnte nicht geladen werden</p>';
+      }
+    }
+    function loadStatsCharts() {
+      if (statsChartsLoaded) return;
+      statsChartsLoaded = true;
+      try {
+        Object.keys(statsChartInstances || {}).forEach(function(id) { var ch = statsChartInstances[id]; if (ch && typeof ch.destroy === 'function') ch.destroy(); statsChartInstances[id] = null; });
+      } catch (e) {}
+      statsChartInstances = {};
+      fetch('/api/stats/history?days=30').then(function(res) { return res.json(); }).then(function(r) {
+        var days = getLastDays(r.days || 30);
+        var requests = mapToDays(days, r.requestsByDay || []);
+        var created = mapToDays(days, r.certsCreatedByDay || []);
+        var revoked = mapToDays(days, r.certsRevokedByDay || []);
+        var renewed = mapToDays(days, r.certsRenewedByDay || []);
+        var acme = mapToDays(days, r.acmeOrdersByDay || []);
+        var cumulative = [];
+        var total = 0;
+        days.forEach(function(date) {
+          var c = (r.certsCreatedByDay || []).find(function(o) { return o.date === date; });
+          var rev = (r.certsRevokedByDay || []).find(function(o) { return o.date === date; });
+          if (c) total += c.count;
+          if (rev) total -= rev.count;
+          cumulative.push({ date: date, count: total });
+        });
+        createBarChart('chartRequests', requests, 'requests');
+        createBarChart('chartCertsCreated', created, '');
+        createBarChart('chartCertsRevoked', revoked, 'revoked');
+        createBarChart('chartCertsRenewed', renewed, 'renewed');
+        createBarChart('chartAcmeOrders', acme, '');
+        createLineChart('chartCertsTotal', cumulative);
+      }).catch(function() {
+        ['chartRequests', 'chartCertsCreated', 'chartCertsRevoked', 'chartCertsRenewed', 'chartAcmeOrders', 'chartCertsTotal'].forEach(function(id) {
+          var el = document.getElementById(id);
+          if (el) el.innerHTML = '<p class="stats-chart-empty">Daten konnten nicht geladen werden</p>';
+        });
+        statsChartsLoaded = false;
+      });
+    }
     function htmlEscape(s) {
       if (s == null) return '';
       var str = String(s);
@@ -788,7 +1242,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       clearTimeout(el._hideId);
       el._hideId = setTimeout(function() { el.classList.remove('show'); }, 5000);
     }
-    document.getElementById('toast').addEventListener('click', function() { this.classList.remove('show'); });
+    var toastEl = document.getElementById('toast');
+    if (toastEl) toastEl.addEventListener('click', function() { this.classList.remove('show'); });
     function closeModal(id) { var el = document.getElementById(id); if (el) el.classList.remove('open'); }
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
@@ -806,9 +1261,13 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     var copyBtn = document.getElementById('copyDirectoryUrlBtn');
     if (copyBtn) copyBtn.addEventListener('click', copyDirectoryUrl);
     function updateCaCard(configured) {
-      document.getElementById('caNotConfigured').style.display = configured ? 'none' : 'block';
-      document.getElementById('caConfigured').style.display = configured ? 'block' : 'none';
-      if (configured) document.getElementById('caDirectoryUrl').textContent = window.location.origin + '/acme/directory';
+      var caNot = document.getElementById('caNotConfigured');
+      var caYes = document.getElementById('caConfigured');
+      if (caNot) caNot.style.display = configured ? 'none' : 'block';
+      if (caYes) caYes.style.display = configured ? 'block' : 'none';
+      var url = configured ? window.location.origin + '/acme/directory' : '';
+      var urlEl = document.getElementById('caDirectoryUrl');
+      if (urlEl) urlEl.textContent = url;
     }
     setInterval(function updateAcmeCountdowns() {
       document.querySelectorAll('.acme-validation-countdown').forEach(function(span) {
@@ -829,7 +1288,107 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       });
     }, 1000);
     document.body.addEventListener('click', function(e) {
-      var acceptAcmeBtn = e.target.closest && e.target.closest('.btn-accept-acme-authz');
+      var clickEl = e.target && e.target.nodeType === 3 ? e.target.parentElement : e.target;
+      if (!clickEl) return;
+      var viewCertBtn = clickEl.closest ? clickEl.closest('.btn-view-cert') : null;
+      var viewCertId = viewCertBtn ? viewCertBtn.getAttribute('data-cert-id') : null;
+      if (viewCertBtn && viewCertId) {
+        e.preventDefault();
+        e.stopPropagation();
+        var modal = document.getElementById('certViewModal');
+        if (modal) {
+          modal.classList.add('open');
+          document.getElementById('certViewModalTitle').textContent = 'Zertifikat-Details';
+          document.querySelectorAll('.cert-view-cert-only').forEach(function(el) { el.style.display = ''; });
+          document.querySelectorAll('.cert-view-ca-only').forEach(function(el) { el.style.display = 'none'; });
+          document.querySelectorAll('.cert-view-int-only').forEach(function(el) { el.style.display = 'none'; });
+          document.getElementById('certViewPem').textContent = 'Lade…';
+          document.getElementById('certViewDownloads').innerHTML = '';
+          fetch('/api/cert/info?id=' + encodeURIComponent(viewCertId)).then(function(res) {
+            return res.json().then(function(d) {
+              if (!res.ok) { throw new Error(d && d.error ? d.error : 'Laden fehlgeschlagen'); }
+              return d;
+            });
+          }).then(function(d) {
+            var fmt = function(v) { return v != null && v !== '' ? String(v) : '—'; };
+            document.getElementById('certViewDomain').textContent = fmt(d.domain);
+            document.getElementById('certViewSubject').textContent = fmt(d.subject);
+            document.getElementById('certViewIssuer').textContent = fmt(d.issuer);
+            document.getElementById('certViewSerial').textContent = fmt(d.serialNumber);
+            document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
+            document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
+            document.getElementById('certViewFingerprint').textContent = fmt(d.fingerprint256);
+            document.getElementById('certViewKeyType').textContent = fmt(d.keyType);
+            document.getElementById('certViewKeyInfo').textContent = fmt(d.keyInfo);
+            document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
+            document.getElementById('certViewSan').textContent = fmt(d.subjectAltName);
+            document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
+            document.getElementById('certViewId').textContent = fmt(d.id);
+            document.getElementById('certViewPem').textContent = d.pem || '—';
+            var dl = document.getElementById('certViewDownloads');
+            dl.innerHTML = '<a href="/api/cert/download?id=' + encodeURIComponent(d.id) + '" class="btn" download>Zertifikat herunterladen</a> <a href="/api/cert/key?id=' + encodeURIComponent(d.id) + '" class="btn" download>Schlüssel herunterladen</a>';
+          }).catch(function(err) { showError(err && err.message ? err.message : 'Laden fehlgeschlagen'); document.getElementById('certViewPem').textContent = '—'; });
+        }
+        return;
+      }
+      var renewCertBtn = clickEl.closest ? clickEl.closest('.btn-renew') : null;
+      if (renewCertBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        var certId = renewCertBtn.getAttribute('data-cert-id');
+        var domain = renewCertBtn.getAttribute('data-cert-domain');
+        if (certId && domain != null) {
+          document.getElementById('certRenewDomain').textContent = domain.replace(/&quot;/g, '"');
+          var confirmBtn = document.getElementById('certRenewConfirmBtn');
+          if (confirmBtn) confirmBtn.setAttribute('data-cert-id', certId);
+          document.getElementById('certRenewModal').classList.add('open');
+        }
+        return;
+      }
+      var viewCaBtn = clickEl.closest ? clickEl.closest('.btn-view-ca') : null;
+      if (viewCaBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        var caId = viewCaBtn.getAttribute('data-ca-id');
+        var caType = viewCaBtn.getAttribute('data-ca-type') || '';
+        if (caId) {
+          document.getElementById('certViewModal').classList.add('open');
+          document.getElementById('certViewModalTitle').textContent = 'CA-Details';
+          document.querySelectorAll('.cert-view-cert-only').forEach(function(el) { el.style.display = 'none'; });
+          document.querySelectorAll('.cert-view-ca-only').forEach(function(el) { el.style.display = ''; });
+          document.querySelectorAll('.cert-view-int-only').forEach(function(el) { el.style.display = caType === 'intermediate' ? '' : 'none'; });
+          document.getElementById('certViewPem').textContent = 'Lade…';
+          document.getElementById('certViewDownloads').innerHTML = '';
+          fetch('/api/ca/info?id=' + encodeURIComponent(caId)).then(function(res) {
+            return res.json().then(function(d) {
+              if (!res.ok) { throw new Error(d && d.error ? d.error : 'Laden fehlgeschlagen'); }
+              return d;
+            });
+          }).then(function(d) {
+            var fmt = function(v) { return v != null && v !== '' ? String(v) : '—'; };
+            document.getElementById('certViewType').textContent = d.type === 'root' ? 'Root-CA' : 'Intermediate CA';
+            document.getElementById('certViewName').textContent = fmt(d.name);
+            document.getElementById('certViewCommonName').textContent = fmt(d.commonName);
+            document.getElementById('certViewParentCa').textContent = fmt(d.parentCaId);
+            document.getElementById('certViewSubject').textContent = fmt(d.subject);
+            document.getElementById('certViewIssuer').textContent = fmt(d.issuer);
+            document.getElementById('certViewSerial').textContent = fmt(d.serialNumber);
+            document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
+            document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
+            document.getElementById('certViewFingerprint').textContent = fmt(d.fingerprint256);
+            document.getElementById('certViewKeyType').textContent = fmt(d.keyType);
+            document.getElementById('certViewKeyInfo').textContent = fmt(d.keyInfo);
+            document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
+            document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
+            document.getElementById('certViewId').textContent = fmt(d.id);
+            document.getElementById('certViewPem').textContent = d.pem || '—';
+            var dl = document.getElementById('certViewDownloads');
+            dl.innerHTML = '<a href="/api/ca-cert?id=' + encodeURIComponent(d.id) + '" class="btn" download>Zertifikat herunterladen</a>';
+          }).catch(function(err) { showError(err && err.message ? err.message : 'Laden fehlgeschlagen'); document.getElementById('certViewPem').textContent = '—'; });
+        }
+        return;
+      }
+      var acceptAcmeBtn = clickEl.closest ? clickEl.closest('.btn-accept-acme-authz') : null;
       if (acceptAcmeBtn) {
         e.preventDefault();
         var authzId = acceptAcmeBtn.getAttribute('data-authz-id');
@@ -841,7 +1400,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
-      var delAcmeBtn = e.target.closest && e.target.closest('.btn-delete-acme-authz');
+      var delAcmeBtn = clickEl.closest ? clickEl.closest('.btn-delete-acme-authz') : null;
       if (delAcmeBtn) {
         e.preventDefault();
         var authzId = delAcmeBtn.getAttribute('data-authz-id');
@@ -853,7 +1412,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
-      var delChBtn = e.target.closest && e.target.closest('.btn-delete-challenge');
+      var delChBtn = clickEl.closest ? clickEl.closest('.btn-delete-challenge') : null;
       if (delChBtn) {
         e.preventDefault();
         var chId = delChBtn.getAttribute('data-challenge-id');
@@ -865,7 +1424,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
-      var delWhitelistBtn = e.target.closest && e.target.closest('.btn-delete-acme-whitelist');
+      var delWhitelistBtn = clickEl.closest ? clickEl.closest('.btn-delete-acme-whitelist') : null;
       if (delWhitelistBtn) {
         e.preventDefault();
         var wid = delWhitelistBtn.getAttribute('data-id');
@@ -877,8 +1436,23 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
-      var btn = e.target.closest && e.target.closest('[data-ca-id]');
-      if (btn) { e.preventDefault(); activateCa(btn.getAttribute('data-ca-id')); }
+      var delCaAssignmentBtn = clickEl.closest ? clickEl.closest('.btn-delete-acme-ca-assignment') : null;
+      if (delCaAssignmentBtn) {
+        e.preventDefault();
+        var pattern = delCaAssignmentBtn.getAttribute('data-pattern');
+        if (pattern) {
+          delCaAssignmentBtn.disabled = true;
+          fetch('/api/acme-ca-assignments?pattern=' + encodeURIComponent(pattern), { method: 'DELETE' }).then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); }).then(function(r) {
+            if (r.ok) location.reload(); else showError('Fehler: ' + (r.data && r.data.error ? r.data.error : 'Zuordnung löschen fehlgeschlagen'));
+          }).catch(function(err) { showError(err && err.message ? err.message : 'Zuordnung löschen fehlgeschlagen'); }).finally(function() { delCaAssignmentBtn.disabled = false; });
+        }
+        return;
+      }
+      var btn = clickEl.closest ? clickEl.closest('[data-ca-id]') : null;
+      if (btn && !btn.classList.contains('btn-view-ca') && !btn.classList.contains('btn-view-cert')) {
+        e.preventDefault();
+        activateCa(btn.getAttribute('data-ca-id'));
+      }
     });
     async function activateCa(id) {
       const res = await fetch('/api/ca/activate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id }) });
@@ -900,6 +1474,42 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           })
           .catch(function(err) { showError(err && err.message ? err.message : 'Hinzufügen fehlgeschlagen'); })
           .finally(function() { acmeWhitelistForm.querySelector('button[type="submit"]').disabled = false; });
+      });
+    }
+    var acmeCaAssignmentsForm = document.getElementById('acmeCaAssignmentsForm');
+    if (acmeCaAssignmentsForm) {
+      acmeCaAssignmentsForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var patternInput = document.getElementById('acmeCaAssignmentPattern');
+        var caSelect = document.getElementById('acmeCaAssignmentCa');
+        var pattern = patternInput && patternInput.value ? patternInput.value.trim().toLowerCase() : '';
+        var caId = caSelect && caSelect.value ? caSelect.value : '';
+        if (!pattern) { showError('Bitte Domain oder Muster eingeben (z. B. example.com oder *.example.com)'); return; }
+        if (!caId) { showError('Bitte eine CA auswählen'); return; }
+        acmeCaAssignmentsForm.querySelector('button[type="submit"]').disabled = true;
+        fetch('/api/acme-ca-assignments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain_pattern: pattern, ca_id: caId }) })
+          .then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); })
+          .then(function(r) {
+            if (r.ok) { patternInput.value = ''; caSelect.value = ''; location.reload(); } else showError('Fehler: ' + (r.data && r.data.error ? r.data.error : 'Zuordnung hinzufügen fehlgeschlagen'));
+          })
+          .catch(function(err) { showError(err && err.message ? err.message : 'Zuordnung hinzufügen fehlgeschlagen'); })
+          .finally(function() { acmeCaAssignmentsForm.querySelector('button[type="submit"]').disabled = false; });
+      });
+    }
+    var acmeDefaultIntermediateForm = document.getElementById('acmeDefaultIntermediateForm');
+    if (acmeDefaultIntermediateForm) {
+      acmeDefaultIntermediateForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+        var selectEl = document.getElementById('acmeDefaultIntermediateSelect');
+        var id = selectEl && selectEl.value ? selectEl.value.trim() : null;
+        acmeDefaultIntermediateForm.querySelector('button[type="submit"]').disabled = true;
+        fetch('/api/acme-default-intermediate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id || null }) })
+          .then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); })
+          .then(function(r) {
+            if (r.ok) location.reload(); else showError('Fehler: ' + (r.data && r.data.error ? r.data.error : 'Standard-Intermediate setzen fehlgeschlagen'));
+          })
+          .catch(function(err) { showError(err && err.message ? err.message : 'Standard-Intermediate setzen fehlgeschlagen'); })
+          .finally(function() { acmeDefaultIntermediateForm.querySelector('button[type="submit"]').disabled = false; });
       });
     }
     updateCaCard(initialData.caConfigured);
@@ -987,14 +1597,229 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       });
       saveCollapsedIds(ids);
     }
+    var lastCertTreeData = { certs: [], cas: [], ints: [] };
     function updateCertTree(certs, casList, intList) {
       var el = document.getElementById('certTree');
       if (!el) return;
+      lastCertTreeData = { certs: certs || [], cas: casList || [], ints: intList || [] };
       el.innerHTML = buildCertTreeHtml(certs, casList, intList);
       applyStoredCollapsedState();
+      drawCertHoneycomb(lastCertTreeData.certs, lastCertTreeData.cas, lastCertTreeData.ints);
     }
-    document.getElementById('certTree').addEventListener('click', function(e) {
-      var delCaBtn = e.target.closest && e.target.closest('.btn-delete-ca');
+    function drawCertHoneycomb(certs, casList, intList) {
+      var canvas = document.getElementById('certHoneycombCanvas');
+      if (!canvas) return;
+      var ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      casList = casList || [];
+      intList = intList || [];
+      certs = certs || [];
+      var HEX_SIZE = 14;
+      var SQ3 = Math.sqrt(3);
+      function hexToPixel(q, r) {
+        var x = HEX_SIZE * (SQ3 * q + SQ3 / 2 * r);
+        var y = HEX_SIZE * (3 / 2 * r);
+        return { x: x, y: y };
+      }
+      var dirs = [{ q: 0, r: -1 }, { q: 1, r: -1 }, { q: 1, r: 0 }, { q: 0, r: 1 }, { q: -1, r: 1 }, { q: -1, r: 0 }];
+      var nodes = [];
+      var used = {};
+      function takeHex(q, r) {
+        var key = q + ',' + r;
+        if (used[key]) return false;
+        used[key] = true;
+        return true;
+      }
+      var rootOffsets = [];
+      for (var ri = 0; ri < casList.length; ri++) rootOffsets.push({ q: ri - (casList.length - 1) / 2, r: 0 });
+      casList.forEach(function(root, ri) {
+        var o = rootOffsets[ri];
+        var q = Math.round(o.q), r = Math.round(o.r);
+        if (!takeHex(q, r)) { q = 0; r = 0; takeHex(0, 0); }
+        nodes.push({ type: 'root', id: root.id, label: root.name, q: q, r: r, issuerId: null });
+      });
+      casList.forEach(function(root, ri) {
+        var rootNode = nodes.find(function(n) { return n.type === 'root' && n.id === root.id; });
+        if (!rootNode) return;
+        var ints = intList.filter(function(i) { return i.parentCaId === root.id; });
+        var directCerts = certs.filter(function(c) { return c.issuer_id === root.id; });
+        var ring1 = [];
+        for (var d = 0; d < 6; d++) ring1.push({ q: rootNode.q + dirs[d].q, r: rootNode.r + dirs[d].r });
+        var ring2 = [];
+        for (var d = 0; d < 6; d++) {
+          var n = ring1[d];
+          ring2.push({ q: n.q + dirs[d].q, r: n.r + dirs[d].r });
+          ring2.push({ q: n.q + dirs[(d + 1) % 6].q, r: n.r + dirs[(d + 1) % 6].r });
+        }
+        ring2 = ring2.filter(function(c, i) { return ring2.findIndex(function(x) { return x.q === c.q && x.r === c.r; }) === i; });
+        var idx = 0;
+        ints.forEach(function(int) {
+          var cell = ring1[idx % ring1.length];
+          idx++;
+          if (!takeHex(cell.q, cell.r)) return;
+          nodes.push({ type: 'intermediate', id: int.id, label: int.name, q: cell.q, r: cell.r, issuerId: root.id });
+        });
+        directCerts.forEach(function(c) {
+          var cell = ring2[idx % ring2.length];
+          idx++;
+          if (!takeHex(cell.q, cell.r)) return;
+          nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: cell.q, r: cell.r, issuerId: root.id });
+        });
+      });
+      intList.forEach(function(int) {
+        var intNode = nodes.find(function(n) { return n.type === 'intermediate' && n.id === int.id; });
+        if (!intNode) return;
+        var childCerts = certs.filter(function(c) { return c.issuer_id === int.id; });
+        for (var d = 0; d < 6 && childCerts.length > 0; d++) {
+          var nq = intNode.q + dirs[d].q, nr = intNode.r + dirs[d].r;
+          if (!takeHex(nq, nr)) continue;
+          var c = childCerts.shift();
+          nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: nq, r: nr, issuerId: int.id });
+        }
+      });
+      var certsNoIssuer = certs.filter(function(c) { return !c.issuer_id; });
+      if (certsNoIssuer.length > 0 && casList.length === 0) {
+        certsNoIssuer.forEach(function(c, ci) {
+          var d = dirs[ci % 6];
+          var q = d.q * (ci + 1), r = d.r * (ci + 1);
+          if (!takeHex(q, r)) return;
+          nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: q, r: r, issuerId: null });
+        });
+      }
+      if (nodes.length === 0) {
+        ctx.fillStyle = 'var(--gh-canvas-subtle)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'var(--gh-fg-muted)';
+        ctx.font = '14px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText('Keine CAs oder Zertifikate', canvas.width / 2, canvas.height / 2);
+        return;
+      }
+      var minQ = nodes[0].q, maxQ = nodes[0].q, minR = nodes[0].r, maxR = nodes[0].r;
+      nodes.forEach(function(n) {
+        if (n.q < minQ) minQ = n.q; if (n.q > maxQ) maxQ = n.q;
+        if (n.r < minR) minR = n.r; if (n.r > maxR) maxR = n.r;
+      });
+      var pad = HEX_SIZE * 2;
+      var p0 = hexToPixel(minQ, minR);
+      var p1 = hexToPixel(maxQ, maxR);
+      var w = p1.x - p0.x + 2 * pad;
+      var h = p1.y - p0.y + 2 * pad;
+      var fitScale = Math.min((canvas.width - 2 * pad) / w, (canvas.height - 2 * pad) / h);
+      var scale = Math.max(1.1, fitScale);
+      var cx = (minQ + maxQ) / 2, cy = (minR + maxR) / 2;
+      var centerPx = hexToPixel(cx, cy);
+      var offsetX = canvas.width / 2 - centerPx.x * scale;
+      var offsetY = canvas.height / 2 - centerPx.y * scale;
+      function toScreen(q, r) {
+        var p = hexToPixel(q, r);
+        return { x: offsetX + p.x * scale, y: offsetY + p.y * scale };
+      }
+      var maxDist = 0;
+      nodes.forEach(function(n) {
+        var d = (Math.abs(n.q) + Math.abs(n.r) + Math.abs(n.q + n.r)) / 2;
+        if (d > maxDist) maxDist = d;
+      });
+      maxDist = Math.max(maxDist, 1);
+      var nodeKeys = {};
+      nodes.forEach(function(n) { nodeKeys[n.q + ',' + n.r] = true; });
+      function hexDist(q1, r1, q2, r2) {
+        return (Math.abs(q1 - q2) + Math.abs(r1 - r2) + Math.abs(q1 + r1 - q2 - r2)) / 2;
+      }
+      var bgCells = [];
+      var bgSeen = {};
+      function addBg(q, r) {
+        var key = q + ',' + r;
+        if (nodeKeys[key] || bgSeen[key]) return;
+        bgSeen[key] = true;
+        bgCells.push({ q: q, r: r });
+      }
+      nodes.forEach(function(n) {
+        for (var d = 0; d < 6; d++) addBg(n.q + dirs[d].q, n.r + dirs[d].r);
+      });
+      var ring1Count = bgCells.length;
+      for (var bi = 0; bi < ring1Count; bi++) {
+        var c = bgCells[bi];
+        for (var d = 0; d < 6; d++) addBg(c.q + dirs[d].q, c.r + dirs[d].r);
+      }
+      var rootColor = '#0969da';
+      try { var v = getComputedStyle(document.documentElement).getPropertyValue('--gh-accent').trim(); if (v) rootColor = v; } catch (e) {}
+      var rootHex = rootColor.indexOf('var(') >= 0 ? '#0969da' : rootColor;
+      function lighten(hex, pct) {
+        var num = parseInt(hex.slice(1), 16); if (isNaN(num)) return '#58a6ff';
+        var r = (num >> 16) & 255, g = (num >> 8) & 255, b = num & 255;
+        r = Math.min(255, Math.round(r + (255 - r) * pct)); g = Math.min(255, Math.round(g + (255 - g) * pct)); b = Math.min(255, Math.round(b + (255 - b) * pct));
+        return '#' + (r << 16 | g << 8 | b).toString(16).padStart(6, '0');
+      }
+      var certFillHex = lighten(rootHex, 0.6);
+      var strokeColor = 'rgba(0,0,0,0.35)';
+      try { var border = getComputedStyle(document.documentElement).getPropertyValue('--gh-border-default').trim(); if (border) strokeColor = border; } catch (e) {}
+      if (strokeColor.indexOf('var(') >= 0) strokeColor = 'rgba(0,0,0,0.35)';
+      var hexRadius = HEX_SIZE * scale;
+      function drawHexAt(q, r, fillStyle, strokeOpacity) {
+        var center = toScreen(q, r);
+        ctx.beginPath();
+        for (var i = 0; i < 6; i++) {
+          var a = (Math.PI / 2) - (i * Math.PI / 3);
+          var sx = center.x + hexRadius * Math.cos(a);
+          var sy = center.y + hexRadius * Math.sin(a);
+          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        }
+        ctx.closePath();
+        ctx.fillStyle = fillStyle;
+        ctx.fill();
+        ctx.strokeStyle = strokeOpacity != null ? strokeColor.replace('0.35', String(strokeOpacity)) : strokeColor;
+        if (strokeOpacity != null && strokeColor.indexOf('rgba') === -1) ctx.strokeStyle = 'rgba(0,0,0,' + strokeOpacity + ')';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      bgCells.forEach(function(c) {
+        var dist = Infinity;
+        nodes.forEach(function(n) { var d = hexDist(c.q, c.r, n.q, n.r); if (d < dist) dist = d; });
+        var opacity = Math.max(0, 0.35 - dist * 0.12);
+        if (opacity <= 0) return;
+        var fill = certFillHex;
+        var num = parseInt(fill.slice(1), 16);
+        if (!isNaN(num)) {
+          var r = (num >> 16) & 255, g = (num >> 8) & 255, b = num & 255;
+          ctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',' + opacity + ')';
+        } else ctx.fillStyle = fill;
+        var center = toScreen(c.q, c.r);
+        ctx.beginPath();
+        for (var i = 0; i < 6; i++) {
+          var a = (Math.PI / 2) - (i * Math.PI / 3);
+          var sx = center.x + hexRadius * Math.cos(a);
+          var sy = center.y + hexRadius * Math.sin(a);
+          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,' + (opacity * 0.6) + ')';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+      nodes.forEach(function(n) {
+        var dist = (Math.abs(n.q) + Math.abs(n.r) + Math.abs(n.q + n.r)) / 2;
+        var fade = 1 - (dist / maxDist) * 0.5;
+        var base = n.type === 'root' ? rootHex : n.type === 'intermediate' ? lighten(rootHex, 0.35) : lighten(rootHex, 0.6);
+        var fill = base;
+        if (fade < 1) {
+          var num = parseInt(base.slice(1), 16);
+          if (!isNaN(num)) {
+            var r = (num >> 16) & 255, g = (num >> 8) & 255, b = num & 255;
+            r = Math.round(r + (255 - r) * (1 - fade)); g = Math.round(g + (255 - g) * (1 - fade)); b = Math.round(b + (255 - b) * (1 - fade));
+            fill = '#' + (r << 16 | g << 8 | b).toString(16).padStart(6, '0');
+          }
+        }
+        drawHexAt(n.q, n.r, fill);
+      });
+    }
+    var certTreeEl = document.getElementById('certTree');
+    if (certTreeEl) certTreeEl.addEventListener('click', function(e) {
+      var clickEl = e.target && e.target.nodeType === 3 ? e.target.parentElement : e.target;
+      if (!clickEl || !clickEl.closest) return;
+      var delCaBtn = clickEl.closest('.btn-delete-ca');
       if (delCaBtn) {
         e.preventDefault();
         var caId = delCaBtn.getAttribute('data-ca-id');
@@ -1013,7 +1838,47 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
-      var viewCaBtn = e.target.closest && e.target.closest('.btn-view-ca');
+      var viewBtn = clickEl.closest('.btn-view-cert');
+      var certId = viewBtn ? viewBtn.getAttribute('data-cert-id') : null;
+      if (viewBtn && certId) {
+        e.preventDefault();
+        e.stopPropagation();
+        var modal = document.getElementById('certViewModal');
+        if (!modal) return;
+        modal.classList.add('open');
+        document.getElementById('certViewModalTitle').textContent = 'Zertifikat-Details';
+        document.querySelectorAll('.cert-view-cert-only').forEach(function(el) { el.style.display = ''; });
+        document.querySelectorAll('.cert-view-ca-only').forEach(function(el) { el.style.display = 'none'; });
+        document.querySelectorAll('.cert-view-int-only').forEach(function(el) { el.style.display = 'none'; });
+        document.getElementById('certViewPem').textContent = 'Lade…';
+        document.getElementById('certViewDownloads').innerHTML = '';
+        fetch('/api/cert/info?id=' + encodeURIComponent(certId)).then(function(res) {
+          return res.json().then(function(d) {
+            if (!res.ok) { throw new Error(d && d.error ? d.error : 'Laden fehlgeschlagen'); }
+            return d;
+          });
+        }).then(function(d) {
+          var fmt = function(v) { return v != null && v !== '' ? String(v) : '—'; };
+          document.getElementById('certViewDomain').textContent = fmt(d.domain);
+          document.getElementById('certViewSubject').textContent = fmt(d.subject);
+          document.getElementById('certViewIssuer').textContent = fmt(d.issuer);
+          document.getElementById('certViewSerial').textContent = fmt(d.serialNumber);
+          document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
+          document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
+          document.getElementById('certViewFingerprint').textContent = fmt(d.fingerprint256);
+          document.getElementById('certViewKeyType').textContent = fmt(d.keyType);
+          document.getElementById('certViewKeyInfo').textContent = fmt(d.keyInfo);
+          document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
+          document.getElementById('certViewSan').textContent = fmt(d.subjectAltName);
+          document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
+          document.getElementById('certViewId').textContent = fmt(d.id);
+          document.getElementById('certViewPem').textContent = d.pem || '—';
+          var dl = document.getElementById('certViewDownloads');
+          dl.innerHTML = '<a href="/api/cert/download?id=' + encodeURIComponent(d.id) + '" class="btn" download>Zertifikat herunterladen</a> <a href="/api/cert/key?id=' + encodeURIComponent(d.id) + '" class="btn" download>Schlüssel herunterladen</a>';
+        }).catch(function(err) { showError(err && err.message ? err.message : 'Laden fehlgeschlagen'); document.getElementById('certViewPem').textContent = '—'; });
+        return;
+      }
+      var viewCaBtn = clickEl.closest('.btn-view-ca');
       if (viewCaBtn) {
         e.preventDefault();
         e.stopPropagation();
@@ -1044,6 +1909,9 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
           document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
           document.getElementById('certViewFingerprint').textContent = fmt(d.fingerprint256);
+          document.getElementById('certViewKeyType').textContent = fmt(d.keyType);
+          document.getElementById('certViewKeyInfo').textContent = fmt(d.keyInfo);
+          document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
           document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
           document.getElementById('certViewId').textContent = fmt(d.id);
           document.getElementById('certViewPem').textContent = d.pem || '—';
@@ -1052,43 +1920,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }).catch(function(err) { showError(err && err.message ? err.message : 'Laden fehlgeschlagen'); document.getElementById('certViewPem').textContent = '—'; });
         return;
       }
-      var viewBtn = e.target.closest && e.target.closest('.btn-view-cert');
-      if (viewBtn) {
-        e.preventDefault();
-        e.stopPropagation();
-        var certId = viewBtn.getAttribute('data-cert-id');
-        if (!certId) return;
-        document.getElementById('certViewModal').classList.add('open');
-        document.getElementById('certViewModalTitle').textContent = 'Zertifikat-Details';
-        document.querySelectorAll('.cert-view-cert-only').forEach(function(el) { el.style.display = ''; });
-        document.querySelectorAll('.cert-view-ca-only').forEach(function(el) { el.style.display = 'none'; });
-        document.querySelectorAll('.cert-view-int-only').forEach(function(el) { el.style.display = 'none'; });
-        document.getElementById('certViewPem').textContent = 'Lade…';
-        document.getElementById('certViewDownloads').innerHTML = '';
-        fetch('/api/cert/info?id=' + encodeURIComponent(certId)).then(function(res) {
-          return res.json().then(function(d) {
-            if (!res.ok) { throw new Error(d && d.error ? d.error : 'Laden fehlgeschlagen'); }
-            return d;
-          });
-        }).then(function(d) {
-          var fmt = function(v) { return v != null && v !== '' ? String(v) : '—'; };
-          document.getElementById('certViewDomain').textContent = fmt(d.domain);
-          document.getElementById('certViewSubject').textContent = fmt(d.subject);
-          document.getElementById('certViewIssuer').textContent = fmt(d.issuer);
-          document.getElementById('certViewSerial').textContent = fmt(d.serialNumber);
-          document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
-          document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
-          document.getElementById('certViewFingerprint').textContent = fmt(d.fingerprint256);
-          document.getElementById('certViewSan').textContent = fmt(d.subjectAltName);
-          document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
-          document.getElementById('certViewId').textContent = fmt(d.id);
-          document.getElementById('certViewPem').textContent = d.pem || '—';
-          var dl = document.getElementById('certViewDownloads');
-          dl.innerHTML = '<a href="/api/cert/download?id=' + encodeURIComponent(d.id) + '" class="btn" download>Zertifikat herunterladen</a> <a href="/api/cert/key?id=' + encodeURIComponent(d.id) + '" class="btn" download>Schlüssel herunterladen</a>';
-        }).catch(function(err) { showError(err && err.message ? err.message : 'Laden fehlgeschlagen'); document.getElementById('certViewPem').textContent = '—'; });
-        return;
-      }
-      var renewBtn = e.target.closest && e.target.closest('.btn-renew');
+      var renewBtn = clickEl.closest('.btn-renew');
       if (renewBtn) {
         e.preventDefault();
         e.stopPropagation();
@@ -1102,7 +1934,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
-      var revokeBtn = e.target.closest && e.target.closest('.btn-revoke');
+      var revokeBtn = clickEl.closest('.btn-revoke');
       if (revokeBtn) {
         e.preventDefault();
         e.stopPropagation();
@@ -1117,7 +1949,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
-      var delBtn = e.target.closest && e.target.closest('.btn-delete');
+      var delBtn = clickEl.closest('.btn-delete');
       if (delBtn) {
         e.preventDefault();
         var id = delBtn.getAttribute('data-cert-id');
@@ -1131,8 +1963,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }
         return;
       }
-      var toggler = e.target.closest && e.target.closest('.cert-tree__toggler');
-      if (!toggler || e.target.closest('.cert-tree__actions')) return;
+      var toggler = clickEl.closest('.cert-tree__toggler');
+      if (!toggler || clickEl.closest('.cert-tree__actions')) return;
       var branch = toggler.closest('.cert-tree__branch');
       if (!branch) return;
       var expanded = branch.classList.toggle('cert-tree__branch--collapsed');
@@ -1141,9 +1973,10 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       if (arrow) arrow.textContent = expanded ? '▶' : '▼';
       saveCollapsedState();
     });
-    document.getElementById('certTree').addEventListener('keydown', function(e) {
+    if (certTreeEl) certTreeEl.addEventListener('keydown', function(e) {
       if (e.key !== 'Enter' && e.key !== ' ') return;
-      var toggler = e.target.closest && e.target.closest('.cert-tree__toggler');
+      var keyEl = e.target && e.target.nodeType === 3 ? e.target.parentElement : e.target;
+      var toggler = keyEl && keyEl.closest ? keyEl.closest('.cert-tree__toggler') : null;
       if (!toggler) return;
       e.preventDefault();
       var branch = toggler.closest('.cert-tree__branch');
@@ -1155,6 +1988,18 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       saveCollapsedState();
     });
     applyStoredCollapsedState();
+    resizeAndDrawHoneycomb = function() {
+      var canvas = document.getElementById('certHoneycombCanvas');
+      var wrap = canvas && canvas.closest('.cert-honeycomb-wrap');
+      if (canvas && wrap && wrap.offsetWidth) {
+        canvas.width = wrap.offsetWidth;
+        canvas.height = Math.min(360, Math.max(200, Math.round(wrap.offsetWidth * 0.45)));
+      }
+      var data = lastCertTreeData || { certs: initialData.certificates || [], cas: initialData.cas || [], ints: initialData.intermediates || [] };
+      drawCertHoneycomb(data.certs, data.cas, data.ints);
+    };
+    resizeAndDrawHoneycomb();
+    window.addEventListener('resize', resizeAndDrawHoneycomb);
     function openIntermediateModal() {
       var sel = document.getElementById('intermediateParentSelect');
       if (!sel) return;
@@ -1174,8 +2019,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       var form = document.getElementById('intermediateSetupForm');
       var body = {
         parentCaId: getFormVal(form, 'parentCaId') || undefined,
-        name: getFormVal(form, 'name') || getFormVal(form, 'commonName') || '${escapeForScript(DEFAULT_COMMON_NAME_INTERMEDIATE)}',
-        commonName: getFormVal(form, 'commonName') || '${escapeForScript(DEFAULT_COMMON_NAME_INTERMEDIATE)}',
+        name: getFormVal(form, 'name') || getFormVal(form, 'commonName') || '${escapeForScript(defaultCommonNameIntermediate)}',
+        commonName: getFormVal(form, 'commonName') || '${escapeForScript(defaultCommonNameIntermediate)}',
         organization: getFormVal(form, 'organization') || undefined,
         organizationalUnit: getFormVal(form, 'organizationalUnit') || undefined,
         country: getFormVal(form, 'country') || undefined,
@@ -1291,8 +2136,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       if (btn) { btn.disabled = true; btn.textContent = 'Wird erstellt…'; }
       var form = document.getElementById('caSetupForm');
       var body = {
-        name: getFormVal(form, 'name') || getFormVal(form, 'commonName') || '${escapeForScript(DEFAULT_COMMON_NAME_ROOT)}',
-        commonName: getFormVal(form, 'commonName') || '${escapeForScript(DEFAULT_COMMON_NAME_ROOT)}',
+        name: getFormVal(form, 'name') || getFormVal(form, 'commonName') || '${escapeForScript(defaultCommonNameRoot)}',
+        commonName: getFormVal(form, 'commonName') || '${escapeForScript(defaultCommonNameRoot)}',
         organization: getFormVal(form, 'organization') || undefined,
         organizationalUnit: getFormVal(form, 'organizationalUnit') || undefined,
         country: getFormVal(form, 'country') || undefined,
@@ -1320,6 +2165,28 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       }
       return false;
     }
+    (function initLogTerminal() {
+      var pre = document.getElementById('logTerminal');
+      var wrap = pre && pre.closest('.log-terminal-wrap');
+      if (!pre || !wrap) return;
+      function appendLine(line) {
+        var text = pre.textContent || '';
+        pre.textContent = text ? text + '\\n' + line : line;
+        wrap.scrollTop = wrap.scrollHeight;
+      }
+      fetch('/api/log').then(function(res) { return res.json(); }).then(function(data) {
+        var lines = data.lines || [];
+        pre.textContent = lines.join('\\n') || '(Keine Log-Einträge)';
+        wrap.scrollTop = wrap.scrollHeight;
+      }).catch(function() { pre.textContent = '(Log konnte nicht geladen werden)'; });
+      var logEs = new EventSource('/api/log/stream');
+      logEs.onmessage = function(e) {
+        try {
+          var line = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
+          if (line) appendLine(line);
+        } catch (err) {}
+      };
+    })();
     const es = new EventSource('/api/events');
     es.onmessage = (e) => {
       const d = JSON.parse(e.data);
@@ -1386,7 +2253,51 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           ? '<tr><td colspan="2" class="empty-table">Keine Einträge</td></tr>'
           : wl.map(function(w) { return '<tr data-whitelist-id="' + attrEscape(String(w.id)) + '"><td><code>' + htmlEscape(w.domain || '') + '</code></td><td><button type="button" class="btn btn-delete btn-delete-acme-whitelist" data-id="' + attrEscape(String(w.id)) + '" title="Aus Whitelist löschen">Löschen</button></td></tr>'; }).join('');
       }
+      var acmeCaAssignmentsEl = document.getElementById('acmeCaAssignments');
+      if (acmeCaAssignmentsEl && d.acmeCaDomainAssignments) {
+        var casList = d.cas || [];
+        var intList = d.intermediates || [];
+        function caDisplayName(caId) {
+          var r = casList.find(function(c) { return c.id === caId; });
+          if (r) return r.name + (r.commonName && r.commonName !== r.name ? ' (' + r.commonName + ')' : '') + ' (Root)';
+          var i = intList.find(function(c) { return c.id === caId; });
+          if (i) return (i.name || i.id) + ' (Intermediate)';
+          return caId;
+        }
+        var assign = d.acmeCaDomainAssignments;
+        acmeCaAssignmentsEl.innerHTML = assign.length === 0
+          ? '<tr><td colspan="3" class="empty-table">Keine Zuordnungen. Standard-CA wird verwendet.</td></tr>'
+          : assign.map(function(a) { return '<tr data-pattern="' + attrEscape(a.domainPattern) + '"><td><code>' + htmlEscape(a.domainPattern) + '</code></td><td>' + htmlEscape(caDisplayName(a.caId)) + '</td><td><button type="button" class="btn btn-delete btn-delete-acme-ca-assignment" data-pattern="' + attrEscape(a.domainPattern) + '" title="Zuordnung löschen">Löschen</button></td></tr>'; }).join('');
+      }
+      var acmeDefaultIntermediateSelect = document.getElementById('acmeDefaultIntermediateSelect');
+      if (acmeDefaultIntermediateSelect && d.activeAcmeIntermediateId !== undefined) {
+        acmeDefaultIntermediateSelect.value = d.activeAcmeIntermediateId || '';
+      }
+      if (d.defaultCommonNameRoot) initialData.defaultCommonNameRoot = d.defaultCommonNameRoot;
+      if (d.defaultCommonNameIntermediate) initialData.defaultCommonNameIntermediate = d.defaultCommonNameIntermediate;
+      (function updateStats() {
+        var certs = d.certificates || [];
+        var now = Date.now();
+        var valid = certs.filter(function(c) { return !c.revoked && c.not_after && new Date(c.not_after).getTime() > now; }).length;
+        var expired = certs.filter(function(c) { return !c.revoked && c.not_after && new Date(c.not_after).getTime() <= now; }).length;
+        var revoked = certs.filter(function(c) { return c.revoked; }).length;
+        function set(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; }
+        set('statsCertsTotal', certs.length);
+        set('statsCertsValid', valid);
+        set('statsCertsExpired', expired);
+        set('statsCertsRevoked', revoked);
+        set('statsRootCas', (d.cas || []).length);
+        set('statsIntermediates', (d.intermediates || []).length);
+        set('statsAcmeChallenges', (d.acmeChallenges || []).length);
+        set('statsWhitelist', (d.acmeWhitelistDomains || []).length);
+      })();
     };
+    document.addEventListener('DOMContentLoaded', function() {
+      var total = document.getElementById('certsTotal');
+      var valid = document.getElementById('certsValid');
+      if (total) document.getElementById('statsCertsTotal').textContent = total.textContent;
+      if (valid) document.getElementById('statsCertsValid').textContent = valid.textContent;
+    });
   </script>
 </body>
 </html>`;
