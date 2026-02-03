@@ -18,7 +18,7 @@ import {
 import { addLogStreamClient, getLogLines, logger } from './logger.js';
 import { getSummaryData } from './summary.js';
 import type { PathHelpers } from './paths.js';
-import { safeUnlinkSync, safeParseInt } from './utils.js';
+import { safeUnlinkSync, safeParseInt, MILLISECONDS_PER_SECOND } from './utils.js';
 
 type ApiContext = {
   database: Database;
@@ -135,10 +135,9 @@ function createSseStream(
 
       const run = () => {
         send();
-        intervalId = setInterval(send, 1000);
+        intervalId = setInterval(send, MILLISECONDS_PER_SECOND);
       };
 
-      const MILLISECONDS_PER_SECOND = 1000;
       const millisecondsUntilNextSecond = MILLISECONDS_PER_SECOND - (Date.now() % MILLISECONDS_PER_SECOND);
       timeoutId = setTimeout(run, millisecondsUntilNextSecond);
 

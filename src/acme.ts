@@ -22,13 +22,12 @@ import {
 import { getActiveAcmeIntermediateId, getActiveCaId, getCa, getCaIdForAcmeDomain, getSignerCa } from './ca.js';
 import { logger } from './logger.js';
 import type { PathHelpers } from './paths.js';
-import { matchesWildcardDomain, hasStringProperties } from './utils.js';
+import { matchesWildcardDomain, hasStringProperties, MILLISECONDS_PER_SECOND } from './utils.js';
 
 const webCrypto = globalThis.crypto;
 
 // Constants for ACME protocol
 const NONCE_BYTES = 16;
-const MILLISECONDS_PER_SECOND = 1000;
 const ACME_CHALLENGE_PATH_PREFIX = '/.well-known/acme-challenge/';
 
 /** Signaturalgorithmus für X509CertificateGenerator (RSA oder ECDSA). */
