@@ -1,9 +1,6 @@
 import { existsSync, unlinkSync } from 'node:fs';
 import { logger } from './logger.js';
 
-// Constants
-export const MILLISECONDS_PER_SECOND = 1000;
-
 /**
  * Safely deletes a file, logging any errors instead of throwing
  * @param path - Path to the file to delete

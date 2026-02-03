@@ -22,7 +22,7 @@ import {
 import { getActiveAcmeIntermediateId, getActiveCaId, getCa, getCaIdForAcmeDomain, getSignerCa } from './ca.js';
 import { logger } from './logger.js';
 import type { PathHelpers } from './paths.js';
-import { matchesWildcardDomain, hasStringProperties, MILLISECONDS_PER_SECOND } from './utils.js';
+import { matchesWildcardDomain, hasStringProperties } from './utils.js';
 
 const webCrypto = globalThis.crypto;
 
@@ -212,7 +212,7 @@ export async function runChallengeValidation(
   const isWhitelisted = whitelistRows.some((row) => matchesWildcardDomain(domain, row.domain));
   if (isWhitelisted) {
     logger.debug('acme challenge whitelisted', { domain });
-    const acceptedAt = Math.floor(Date.now() / MILLISECONDS_PER_SECOND);
+    const acceptedAt = Math.floor(Date.now() / 1000);
     database.prepare('UPDATE ca_challenges SET status = ?, accepted_at = ? WHERE challenge_id = ?').run('valid', acceptedAt, challengeId);
     database.prepare('UPDATE ca_authorizations SET status = ? WHERE authz_id = ?').run('valid', challengeRow.authz_id);
     return true;
