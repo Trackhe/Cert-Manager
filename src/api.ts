@@ -18,6 +18,7 @@ import {
 import { addLogStreamClient, getLogLines, logger } from './logger.js';
 import { getSummaryData } from './summary.js';
 import type { PathHelpers } from './paths.js';
+import { safeUnlinkSync, safeParseInt } from './utils.js';
 
 type ApiContext = {
   database: Database;
@@ -108,29 +109,39 @@ function createSseStream(
 ): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
+      let intervalId: ReturnType<typeof setInterval> | undefined;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
       const send = () => {
         try {
           const data = getSummaryData(database, paths);
           controller.enqueue(
             new TextEncoder().encode('data: ' + JSON.stringify(data) + '\n\n')
           );
-        } catch {
-          // ignore
+        } catch (err) {
+          logger.debug('SSE stream error', { error: String(err) });
         }
       };
-      let intervalId: ReturnType<typeof setInterval>;
+
+      const cleanup = () => {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        if (intervalId !== undefined) clearInterval(intervalId);
+        try {
+          controller.close();
+        } catch {
+          // Stream might already be closed
+        }
+      };
+
       const run = () => {
         send();
         intervalId = setInterval(send, 1000);
       };
+
       const millisecondsUntilNextSecond = 1000 - (Date.now() % 1000);
-      const timeoutId = setTimeout(run, millisecondsUntilNextSecond);
-      const onAbort = () => {
-        clearTimeout(timeoutId);
-        clearInterval(intervalId);
-        controller.close();
-      };
-      abortSignal?.addEventListener('abort', onAbort);
+      timeoutId = setTimeout(run, millisecondsUntilNextSecond);
+
+      abortSignal?.addEventListener('abort', cleanup);
     },
   });
 }
@@ -452,13 +463,7 @@ async function handleCertDelete(context: ApiContext): Promise<Response> {
   database.prepare('DELETE FROM revoked_certificates WHERE cert_id = ?').run(certificateId);
   database.prepare('DELETE FROM certificates WHERE id = ?').run(certificateId);
   const keyPath = paths.leafKeyPath(certificateId);
-  if (existsSync(keyPath)) {
-    try {
-      unlinkSync(keyPath);
-    } catch {
-      // Key-Datei konnte nicht gelöscht werden, DB-Eintrag ist weg
-    }
-  }
+  safeUnlinkSync(keyPath, 'certificate key');
   logger.info('Zertifikat gelöscht', { certId: certificateId, domain: row.domain });
   return Response.json({ ok: true });
 }
@@ -634,17 +639,13 @@ async function handleCaDelete(context: ApiContext): Promise<Response> {
     .all(caId) as Array<{ id: string }>;
   for (const int of intermediates) {
     deleteLeafCertsByIssuer(database, paths, int.id);
-    const keyPath = paths.intermediateKeyPath(int.id);
-    const certPath = paths.intermediateCertPath(int.id);
-    if (existsSync(keyPath)) try { unlinkSync(keyPath); } catch { /* ignore */ }
-    if (existsSync(certPath)) try { unlinkSync(certPath); } catch { /* ignore */ }
+    safeUnlinkSync(paths.intermediateKeyPath(int.id), 'intermediate CA key');
+    safeUnlinkSync(paths.intermediateCertPath(int.id), 'intermediate CA cert');
     database.prepare('DELETE FROM intermediate_cas WHERE id = ?').run(int.id);
   }
   deleteLeafCertsByIssuer(database, paths, caId);
-  const rootKeyPath = paths.caKeyPath(caId);
-  const rootCertPath = paths.caCertPath(caId);
-  if (existsSync(rootKeyPath)) try { unlinkSync(rootKeyPath); } catch { /* ignore */ }
-  if (existsSync(rootCertPath)) try { unlinkSync(rootCertPath); } catch { /* ignore */ }
+  safeUnlinkSync(paths.caKeyPath(caId), 'root CA key');
+  safeUnlinkSync(paths.caCertPath(caId), 'root CA cert');
   database.prepare('DELETE FROM acme_ca_domain_assignments WHERE ca_id = ?').run(caId);
   database.prepare('DELETE FROM cas WHERE id = ?').run(caId);
   const activeId = database.prepare(`SELECT value FROM config WHERE key = ?`).get(CONFIG_KEY_ACTIVE_CA_ID) as { value: string } | undefined;
@@ -663,10 +664,8 @@ async function handleCaIntermediateDelete(context: ApiContext): Promise<Response
   if (!row) return Response.json({ error: 'Intermediate-CA nicht gefunden' }, { status: 404 });
   deleteLeafCertsByIssuer(database, paths, id);
   database.prepare('DELETE FROM acme_ca_domain_assignments WHERE ca_id = ?').run(id);
-  const keyPath = paths.intermediateKeyPath(id);
-  const certPath = paths.intermediateCertPath(id);
-  if (existsSync(keyPath)) try { unlinkSync(keyPath); } catch { /* ignore */ }
-  if (existsSync(certPath)) try { unlinkSync(certPath); } catch { /* ignore */ }
+  safeUnlinkSync(paths.intermediateKeyPath(id), 'intermediate CA key');
+  safeUnlinkSync(paths.intermediateCertPath(id), 'intermediate CA cert');
   database.prepare('DELETE FROM intermediate_cas WHERE id = ?').run(id);
   logger.info('Intermediate-CA gelöscht', { intermediateId: id });
   return Response.json({ ok: true });

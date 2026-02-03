@@ -75,10 +75,10 @@ export function getSummaryData(
 ): SummaryData {
   const now = new Date();
 
-  const certCountRow = database.prepare('SELECT COUNT(*) as count FROM certificates').get() as { count: number };
+  const certCountRow = database.prepare('SELECT COUNT(*) as count FROM certificates').get() as { count: number } | undefined;
   const validCountRow = database.prepare(
     "SELECT COUNT(*) as count FROM certificates WHERE not_after > datetime('now')"
-  ).get() as { count: number };
+  ).get() as { count: number } | undefined;
 
   const accountRow = database.prepare(
     "SELECT provider, email, account_url FROM acme_accounts WHERE provider = 'letsencrypt' LIMIT 1"
@@ -201,8 +201,8 @@ export function getSummaryData(
 
   return {
     summary: {
-      certsTotal: certCountRow.count,
-      certsValid: validCountRow.count,
+      certsTotal: certCountRow?.count ?? 0,
+      certsValid: validCountRow?.count ?? 0,
       timeUtc,
       timeLocal,
       letsEncrypt: accountRow
