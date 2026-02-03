@@ -55,3 +55,17 @@ export function safeParseInt(value: unknown): number | null {
   }
   return null;
 }
+
+/**
+ * Validates that a parsed JSON object has the expected string properties
+ * @param obj - The object to validate
+ * @param requiredProps - Array of property names that must be strings
+ * @returns true if all required properties are present and are strings
+ */
+export function hasStringProperties(obj: unknown, requiredProps: string[]): boolean {
+  if (typeof obj !== 'object' || obj === null) {
+    return false;
+  }
+  const record = obj as Record<string, unknown>;
+  return requiredProps.every((prop) => typeof record[prop] === 'string');
+}

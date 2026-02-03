@@ -109,29 +109,40 @@ function createSseStream(
 ): ReadableStream<Uint8Array> {
   return new ReadableStream({
     start(controller) {
+      let intervalId: ReturnType<typeof setInterval> | undefined;
+      let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
       const send = () => {
         try {
           const data = getSummaryData(database, paths);
           controller.enqueue(
             new TextEncoder().encode('data: ' + JSON.stringify(data) + '\n\n')
           );
-        } catch {
-          // ignore
+        } catch (err) {
+          logger.debug('SSE stream error', { error: String(err) });
         }
       };
-      let intervalId: ReturnType<typeof setInterval>;
+
+      const cleanup = () => {
+        if (timeoutId !== undefined) clearTimeout(timeoutId);
+        if (intervalId !== undefined) clearInterval(intervalId);
+        try {
+          controller.close();
+        } catch {
+          // Stream might already be closed
+        }
+      };
+
       const run = () => {
         send();
         intervalId = setInterval(send, 1000);
       };
-      const millisecondsUntilNextSecond = 1000 - (Date.now() % 1000);
-      const timeoutId = setTimeout(run, millisecondsUntilNextSecond);
-      const onAbort = () => {
-        clearTimeout(timeoutId);
-        clearInterval(intervalId);
-        controller.close();
-      };
-      abortSignal?.addEventListener('abort', onAbort);
+
+      const MILLISECONDS_PER_SECOND = 1000;
+      const millisecondsUntilNextSecond = MILLISECONDS_PER_SECOND - (Date.now() % MILLISECONDS_PER_SECOND);
+      timeoutId = setTimeout(run, millisecondsUntilNextSecond);
+
+      abortSignal?.addEventListener('abort', cleanup);
     },
   });
 }

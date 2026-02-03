@@ -22,9 +22,14 @@ import {
 import { getActiveAcmeIntermediateId, getActiveCaId, getCa, getCaIdForAcmeDomain, getSignerCa } from './ca.js';
 import { logger } from './logger.js';
 import type { PathHelpers } from './paths.js';
-import { matchesWildcardDomain } from './utils.js';
+import { matchesWildcardDomain, hasStringProperties } from './utils.js';
 
 const webCrypto = globalThis.crypto;
+
+// Constants for ACME protocol
+const NONCE_BYTES = 16;
+const MILLISECONDS_PER_SECOND = 1000;
+const ACME_CHALLENGE_PATH_PREFIX = '/.well-known/acme-challenge/';
 
 /** Signaturalgorithmus für X509CertificateGenerator (RSA oder ECDSA). */
 type SigningAlgorithm = { name: 'RSASSA-PKCS1-v1_5'; hash: 'SHA-256' } | { name: 'ECDSA'; hash: 'SHA-256'; namedCurve?: string };
@@ -119,7 +124,7 @@ function base64UrlDecode(value: string): string {
 }
 
 function generateNonce(): string {
-  return crypto.randomBytes(16).toString('base64url');
+  return crypto.randomBytes(NONCE_BYTES).toString('base64url');
 }
 
 function jwkThumbprint(jwk: { e: string; kty: string; n: string }): string {
@@ -135,11 +140,19 @@ async function parseJws(body: string): Promise<{
   protected: Record<string, unknown>;
   payload: string;
   raw: string;
-}> {
-  const parsed = JSON.parse(body) as { protected: string; payload: string; signature: string };
-  const raw = parsed.protected + '.' + parsed.payload;
-  const protectedHeader = JSON.parse(base64UrlDecode(parsed.protected)) as Record<string, unknown>;
-  return { protected: protectedHeader, payload: parsed.payload, raw };
+} | null> {
+  try {
+    const parsed = JSON.parse(body);
+    if (!hasStringProperties(parsed, ['protected', 'payload', 'signature'])) {
+      return null;
+    }
+    const jwsData = parsed as { protected: string; payload: string; signature: string };
+    const raw = jwsData.protected + '.' + jwsData.payload;
+    const protectedHeader = JSON.parse(base64UrlDecode(jwsData.protected)) as Record<string, unknown>;
+    return { protected: protectedHeader, payload: jwsData.payload, raw };
+  } catch {
+    return null;
+  }
 }
 
 function verifyJws(body: string, accountKeyPem: string): { payload: unknown } | null {
@@ -187,7 +200,11 @@ export async function runChallengeValidation(
 
   const authorizationRow = database
     .prepare('SELECT identifier FROM ca_authorizations WHERE authz_id = ?')
-    .get(challengeRow.authz_id) as { identifier: string };
+    .get(challengeRow.authz_id) as { identifier: string } | undefined;
+  if (!authorizationRow) {
+    logger.debug('acme authorization not found', { authzId: challengeRow.authz_id });
+    return false;
+  }
   const domain = authorizationRow.identifier;
 
   const whitelistRows = database
@@ -196,13 +213,13 @@ export async function runChallengeValidation(
   const isWhitelisted = whitelistRows.some((row) => matchesWildcardDomain(domain, row.domain));
   if (isWhitelisted) {
     logger.debug('acme challenge whitelisted', { domain });
-    const acceptedAt = Math.floor(Date.now() / 1000);
+    const acceptedAt = Math.floor(Date.now() / MILLISECONDS_PER_SECOND);
     database.prepare('UPDATE ca_challenges SET status = ?, accepted_at = ? WHERE challenge_id = ?').run('valid', acceptedAt, challengeId);
     database.prepare('UPDATE ca_authorizations SET status = ? WHERE authz_id = ?').run('valid', challengeRow.authz_id);
     return true;
   }
 
-  const challengePath = `/.well-known/acme-challenge/${challengeRow.token}`;
+  const challengePath = ACME_CHALLENGE_PATH_PREFIX + challengeRow.token;
   setValidating(challengeId, domain);
 
   for (let attempt = 1; attempt <= VALIDATION_MAX_ATTEMPTS; attempt++) {
