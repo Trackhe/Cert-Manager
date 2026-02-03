@@ -231,25 +231,78 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       padding: 0;
     }
     .gh-header {
-      display: flex;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
       align-items: center;
-      justify-content: space-between;
       gap: 16px;
       background: var(--gh-canvas-subtle);
       border-bottom: 1px solid var(--gh-border);
       padding: 16px 24px;
       margin-bottom: 0;
     }
-    .gh-header h1 {
+    .gh-header-brand {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      line-height: 1.2;
+    }
+    .gh-header-brand .gh-header-title {
       margin: 0;
-      font-size: 20px;
+      font-size: 18px;
       font-weight: 600;
+      color: var(--gh-fg);
+    }
+    .gh-header-brand .gh-header-made {
+      font-size: 11px;
+      color: var(--gh-fg-muted);
+      font-weight: 400;
+    }
+    .gh-header-brand .gh-header-made a {
+      color: var(--gh-fg-muted);
+      text-decoration: none;
+    }
+    .gh-header-brand .gh-header-made a:hover {
+      text-decoration: underline;
+      color: var(--gh-accent);
+    }
+    .gh-header-nav {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .gh-header-nav .nav-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      font-size: 13px;
+      color: var(--gh-fg);
+      text-decoration: none;
+      border: none;
+      background: none;
+      cursor: pointer;
+      font-family: inherit;
+      border-radius: 6px;
+    }
+    .gh-header-nav .nav-link svg {
+      flex-shrink: 0;
+      width: 16px;
+      height: 16px;
+    }
+    .gh-header-nav .nav-link:hover {
+      background: var(--gh-btn-hover);
+    }
+    .gh-header-nav .nav-link.active {
+      background: var(--gh-accent);
+      color: #fff;
     }
     .gh-header-actions {
       display: flex;
       align-items: center;
+      justify-content: flex-end;
       gap: 8px;
-      margin-left: auto;
     }
     .theme-toggle,
     .gh-header-btn {
@@ -263,48 +316,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       height: 1.25em;
     }
     .app-layout {
-      display: flex;
       min-height: calc(100vh - 53px);
-    }
-    .app-sidebar {
-      width: 200px;
-      flex-shrink: 0;
-      background: var(--gh-canvas-subtle);
-      border-right: 1px solid var(--gh-border);
-      padding: 16px 0;
-    }
-    .app-sidebar nav {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-    .app-sidebar .nav-link {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 8px 20px;
-      font-size: 14px;
-      color: var(--gh-fg);
-      text-decoration: none;
-      border: none;
-      background: none;
-      cursor: pointer;
-      text-align: left;
-      width: 100%;
-      font-family: inherit;
-    }
-    .app-sidebar .nav-link svg {
-      flex-shrink: 0;
-      width: 20px;
-      height: 20px;
-      color: currentColor;
-    }
-    .app-sidebar .nav-link:hover {
-      background: var(--gh-btn-hover);
-    }
-    .app-sidebar .nav-link.active {
-      background: var(--gh-accent);
-      color: #fff;
     }
     .app-content {
       flex: 1;
@@ -521,19 +533,11 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
 <body>
   <div id="toast" role="alert" aria-live="assertive"></div>
   <header class="gh-header">
-    <div class="gh-header-actions">
-      <a href="https://github.com/Trackhe/Cert-Manager" target="_blank" rel="noopener noreferrer" class="btn gh-header-btn theme-toggle" title="Cert-Manager auf GitHub" aria-label="GitHub öffnen">
-        <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
-      </a>
-      <button type="button" id="themeToggle" class="btn theme-toggle" title="Dark/Light umschalten" aria-label="Theme umschalten">
-        <span class="theme-toggle-icon theme-icon-light" aria-hidden="true">☀</span>
-        <span class="theme-toggle-icon theme-icon-dark" aria-hidden="true" style="display:none">☽</span>
-      </button>
+    <div class="gh-header-brand">
+      <h1 class="gh-header-title">Cert-Manager</h1>
+      <span class="gh-header-made">made by <a href="https://trackhe.de" target="_blank" rel="noopener noreferrer">trackhe.de</a></span>
     </div>
-  </header>
-  <div class="app-layout">
-  <aside class="app-sidebar" aria-label="Navigation">
-    <nav>
+    <nav class="gh-header-nav" aria-label="Hauptnavigation">
       <button type="button" class="nav-link active" data-section="overview" aria-current="page">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
         Übersicht
@@ -555,7 +559,17 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         Statistiken
       </button>
     </nav>
-  </aside>
+    <div class="gh-header-actions">
+      <a href="https://github.com/Trackhe/Cert-Manager" target="_blank" rel="noopener noreferrer" class="btn gh-header-btn theme-toggle" title="Cert-Manager auf GitHub" aria-label="GitHub öffnen">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+      </a>
+      <button type="button" id="themeToggle" class="btn theme-toggle" title="Dark/Light umschalten" aria-label="Theme umschalten">
+        <span class="theme-toggle-icon theme-icon-light" aria-hidden="true">☀</span>
+        <span class="theme-toggle-icon theme-icon-dark" aria-hidden="true" style="display:none">☽</span>
+      </button>
+    </div>
+  </header>
+  <div class="app-layout">
   <main class="app-content">
   <section id="section-overview" class="dashboard-section active" aria-labelledby="heading-overview">
   <h2 id="heading-overview" class="sr-only">Übersicht</h2>
@@ -1080,12 +1094,12 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       var STORAGE_KEY = 'cert-manager-section';
       function showSection(sectionId) {
         document.querySelectorAll('.dashboard-section').forEach(function(el) { el.classList.remove('active'); });
-        document.querySelectorAll('.app-sidebar .nav-link').forEach(function(el) {
+        document.querySelectorAll('.gh-header-nav .nav-link').forEach(function(el) {
           el.classList.remove('active');
           el.removeAttribute('aria-current');
         });
         var section = document.getElementById('section-' + sectionId);
-        var link = document.querySelector('.app-sidebar .nav-link[data-section="' + sectionId + '"]');
+        var link = document.querySelector('.gh-header-nav .nav-link[data-section="' + sectionId + '"]');
         if (section) section.classList.add('active');
         if (link) { link.classList.add('active'); link.setAttribute('aria-current', 'page'); }
         try { localStorage.setItem(STORAGE_KEY, sectionId); } catch (e) {}
@@ -1098,7 +1112,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       var valid = ['overview', 'acme', 'certificates', 'log', 'statistics'].indexOf(saved) >= 0;
       if (valid) showSection(saved); else showSection('overview');
       if (valid && saved === 'statistics' && typeof loadStatsCharts === 'function') try { loadStatsCharts(); } catch (e) {}
-      document.querySelectorAll('.app-sidebar .nav-link').forEach(function(btn) {
+      document.querySelectorAll('.gh-header-nav .nav-link').forEach(function(btn) {
         btn.addEventListener('click', function() {
           var id = this.getAttribute('data-section');
           if (id) {
@@ -1630,6 +1644,35 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         used[key] = true;
         return true;
       }
+      function hexDist(q1, r1, q2, r2) {
+        return (Math.abs(q1 - q2) + Math.abs(r1 - r2) + Math.abs(q1 + r1 - q2 - r2)) / 2;
+      }
+      /** Erzeugt Zellen in Ringen um (cq, cr): zuerst Ring fromRing, dann fromRing+1, … (ältere Ringe = näher, neuere weiter außen). */
+      function cellsAroundCenter(cq, cr, fromRing, maxCells) {
+        var visited = {};
+        visited[cq + ',' + cr] = true;
+        var frontier = [{ q: cq, r: cr }];
+        var currentRing = 0;
+        var out = [];
+        while (out.length < maxCells && frontier.length > 0) {
+          if (currentRing >= fromRing) {
+            for (var i = 0; i < frontier.length && out.length < maxCells; i++) out.push({ q: frontier[i].q, r: frontier[i].r });
+          }
+          if (out.length >= maxCells) break;
+          var next = [];
+          for (var i = 0; i < frontier.length; i++) {
+            var cell = frontier[i];
+            for (var d = 0; d < 6; d++) {
+              var nq = cell.q + dirs[d].q, nr = cell.r + dirs[d].r;
+              var key = nq + ',' + nr;
+              if (!visited[key]) { visited[key] = true; next.push({ q: nq, r: nr }); }
+            }
+          }
+          frontier = next;
+          currentRing++;
+        }
+        return out;
+      }
       var rootOffsets = [];
       for (var ri = 0; ri < casList.length; ri++) rootOffsets.push({ q: ri - (casList.length - 1) / 2, r: 0 });
       casList.forEach(function(root, ri) {
@@ -1638,20 +1681,19 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         if (!takeHex(q, r)) { q = 0; r = 0; takeHex(0, 0); }
         nodes.push({ type: 'root', id: root.id, label: root.name, q: q, r: r, issuerId: null });
       });
+      var rootNodes = nodes.slice();
       casList.forEach(function(root, ri) {
         var rootNode = nodes.find(function(n) { return n.type === 'root' && n.id === root.id; });
         if (!rootNode) return;
         var ints = intList.filter(function(i) { return i.parentCaId === root.id; });
         var directCerts = certs.filter(function(c) { return c.issuer_id === root.id; });
+        directCerts = directCerts.slice().sort(function(a, b) {
+          var ta = (a.created_at && new Date(a.created_at).getTime()) || 0;
+          var tb = (b.created_at && new Date(b.created_at).getTime()) || 0;
+          return ta - tb;
+        });
         var ring1 = [];
         for (var d = 0; d < 6; d++) ring1.push({ q: rootNode.q + dirs[d].q, r: rootNode.r + dirs[d].r });
-        var ring2 = [];
-        for (var d = 0; d < 6; d++) {
-          var n = ring1[d];
-          ring2.push({ q: n.q + dirs[d].q, r: n.r + dirs[d].r });
-          ring2.push({ q: n.q + dirs[(d + 1) % 6].q, r: n.r + dirs[(d + 1) % 6].r });
-        }
-        ring2 = ring2.filter(function(c, i) { return ring2.findIndex(function(x) { return x.q === c.q && x.r === c.r; }) === i; });
         var idx = 0;
         ints.forEach(function(int) {
           var cell = ring1[idx % ring1.length];
@@ -1659,23 +1701,46 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           if (!takeHex(cell.q, cell.r)) return;
           nodes.push({ type: 'intermediate', id: int.id, label: int.name, q: cell.q, r: cell.r, issuerId: root.id });
         });
+        var rawCellsDirect = cellsAroundCenter(rootNode.q, rootNode.r, 2, directCerts.length * 3);
+        var cellsForDirect = rawCellsDirect.filter(function(cell) {
+          return rootNodes.every(function(rn) { return hexDist(cell.q, cell.r, rn.q, rn.r) >= 2; });
+        });
+        var cellIdx = 0;
         directCerts.forEach(function(c) {
-          var cell = ring2[idx % ring2.length];
-          idx++;
-          if (!takeHex(cell.q, cell.r)) return;
-          nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: cell.q, r: cell.r, issuerId: root.id });
+          while (cellIdx < cellsForDirect.length) {
+            var cell = cellsForDirect[cellIdx++];
+            if (takeHex(cell.q, cell.r)) {
+              nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: cell.q, r: cell.r, issuerId: root.id, revoked: c.revoked, not_after: c.not_after });
+              break;
+            }
+          }
         });
       });
       intList.forEach(function(int) {
         var intNode = nodes.find(function(n) { return n.type === 'intermediate' && n.id === int.id; });
         if (!intNode) return;
+        var parentRoot = nodes.find(function(n) { return n.type === 'root' && n.id === int.parentCaId; });
         var childCerts = certs.filter(function(c) { return c.issuer_id === int.id; });
-        for (var d = 0; d < 6 && childCerts.length > 0; d++) {
-          var nq = intNode.q + dirs[d].q, nr = intNode.r + dirs[d].r;
-          if (!takeHex(nq, nr)) continue;
-          var c = childCerts.shift();
-          nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: nq, r: nr, issuerId: int.id });
-        }
+        childCerts = childCerts.slice().sort(function(a, b) {
+          var ta = (a.created_at && new Date(a.created_at).getTime()) || 0;
+          var tb = (b.created_at && new Date(b.created_at).getTime()) || 0;
+          return ta - tb;
+        });
+        var rawCellsChild = cellsAroundCenter(intNode.q, intNode.r, 1, childCerts.length * 3);
+        var cellsForChild = rawCellsChild.filter(function(cell) {
+          if (!parentRoot) return true;
+          return hexDist(cell.q, cell.r, parentRoot.q, parentRoot.r) >= 2;
+        });
+        var cellIdx = 0;
+        childCerts.forEach(function(c) {
+          while (cellIdx < cellsForChild.length) {
+            var cell = cellsForChild[cellIdx++];
+            if (takeHex(cell.q, cell.r)) {
+              nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: cell.q, r: cell.r, issuerId: int.id, revoked: c.revoked, not_after: c.not_after });
+              break;
+            }
+          }
+        });
       });
       var certsNoIssuer = certs.filter(function(c) { return !c.issuer_id; });
       if (certsNoIssuer.length > 0 && casList.length === 0) {
@@ -1683,7 +1748,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           var d = dirs[ci % 6];
           var q = d.q * (ci + 1), r = d.r * (ci + 1);
           if (!takeHex(q, r)) return;
-          nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: q, r: r, issuerId: null });
+          nodes.push({ type: 'cert', id: String(c.id), label: c.domain, q: q, r: r, issuerId: null, revoked: c.revoked, not_after: c.not_after });
         });
       }
       if (nodes.length === 0) {
@@ -1745,10 +1810,22 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       var rootColor = '#0969da';
       try { var v = getComputedStyle(document.documentElement).getPropertyValue('--gh-accent').trim(); if (v) rootColor = v; } catch (e) {}
       var rootHex = rootColor.indexOf('var(') >= 0 ? '#0969da' : rootColor;
+      var certRedHex = '#cf2222';
+      try { var danger = getComputedStyle(document.documentElement).getPropertyValue('--gh-danger').trim(); if (danger) certRedHex = danger; } catch (e) {}
+      if (certRedHex.indexOf('var(') >= 0) certRedHex = '#cf2222';
       function lighten(hex, pct) {
         var num = parseInt(hex.slice(1), 16); if (isNaN(num)) return '#58a6ff';
         var r = (num >> 16) & 255, g = (num >> 8) & 255, b = num & 255;
         r = Math.min(255, Math.round(r + (255 - r) * pct)); g = Math.min(255, Math.round(g + (255 - g) * pct)); b = Math.min(255, Math.round(b + (255 - b) * pct));
+        return '#' + (r << 16 | g << 8 | b).toString(16).padStart(6, '0');
+      }
+      function blendHex(hex1, hex2, t) {
+        t = Math.max(0, Math.min(1, t));
+        var n1 = parseInt(hex1.slice(1), 16), n2 = parseInt(hex2.slice(1), 16);
+        if (isNaN(n1) || isNaN(n2)) return hex1;
+        var r = Math.round(((n1 >> 16) & 255) * (1 - t) + ((n2 >> 16) & 255) * t);
+        var g = Math.round(((n1 >> 8) & 255) * (1 - t) + ((n2 >> 8) & 255) * t);
+        var b = Math.round((n1 & 255) * (1 - t) + (n2 & 255) * t);
         return '#' + (r << 16 | g << 8 | b).toString(16).padStart(6, '0');
       }
       var certFillHex = lighten(rootHex, 0.6);
@@ -1799,10 +1876,24 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         ctx.lineWidth = 1;
         ctx.stroke();
       });
+      var now = Date.now();
+      var expireWarnDays = 30;
       nodes.forEach(function(n) {
         var dist = (Math.abs(n.q) + Math.abs(n.r) + Math.abs(n.q + n.r)) / 2;
         var fade = 1 - (dist / maxDist) * 0.5;
         var base = n.type === 'root' ? rootHex : n.type === 'intermediate' ? lighten(rootHex, 0.35) : lighten(rootHex, 0.6);
+        if (n.type === 'cert') {
+          if (n.revoked) base = certRedHex;
+          else if (n.not_after) {
+            var notAfterMs = new Date(n.not_after).getTime();
+            var daysLeft = (notAfterMs - now) / (24 * 60 * 60 * 1000);
+            if (daysLeft <= 0) base = certRedHex;
+            else if (daysLeft < expireWarnDays) {
+              var redAmount = 1 - daysLeft / expireWarnDays;
+              base = blendHex(certFillHex, certRedHex, redAmount);
+            }
+          }
+        }
         var fill = base;
         if (fade < 1) {
           var num = parseInt(base.slice(1), 16);
