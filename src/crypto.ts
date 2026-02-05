@@ -17,6 +17,12 @@ export interface SubjectAttributesOptions {
   locality?: string;
   stateOrProvince?: string;
   email?: string;
+  /** EV: z. B. "Private Organization" */
+  businessCategory?: string;
+  /** EV: Jurisdiktion Land (z. B. "DE") */
+  jurisdictionCountryName?: string;
+  /** EV: Handelsregisternummer oder "N/A" */
+  serialNumber?: string;
 }
 
 export function buildSubjectAttributes(options: SubjectAttributesOptions): forge.pki.Attribute[] {
@@ -40,6 +46,18 @@ export function buildSubjectAttributes(options: SubjectAttributesOptions): forge
   }
   if (options.email) {
     attributes.push({ name: 'emailAddress', value: options.email });
+  }
+  if (options.businessCategory) {
+    attributes.push({ name: 'businessCategory', value: options.businessCategory });
+  }
+  if (options.jurisdictionCountryName) {
+    attributes.push({
+      name: 'jurisdictionOfIncorporationCountryName',
+      value: options.jurisdictionCountryName,
+    });
+  }
+  if (options.serialNumber) {
+    attributes.push({ name: 'serialNumber', value: options.serialNumber });
   }
   return attributes;
 }

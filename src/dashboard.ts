@@ -29,6 +29,7 @@ type CertForTree = {
   issuer_id: string | null;
   revoked?: number;
   ca_certificate_id?: number | null;
+  is_ev?: number;
 };
 
 function renderCertTree(
@@ -45,7 +46,8 @@ function renderCertTree(
     const isRevoked = cert.revoked !== undefined && cert.revoked !== 0;
     const isExpired = cert.not_after ? new Date(cert.not_after) < new Date() : false;
     const isAcme = cert.ca_certificate_id != null && cert.ca_certificate_id !== 0;
-    const metaText = (isRevoked ? 'Widerrufen · Gültig bis ' + validUntil : 'Gültig bis ' + validUntil) + (isAcme ? ' · ACME' : '');
+    const isEv = cert.is_ev != null && cert.is_ev !== 0;
+    const metaText = (isRevoked ? 'Widerrufen · Gültig bis ' + validUntil : 'Gültig bis ' + validUntil) + (isAcme ? ' · ACME' : '') + (isEv ? ' · EV' : '');
     const revokeBtn =
       isRevoked || isExpired ? '' : '<button type="button" class="btn btn-revoke" data-cert-id="' + cert.id + '" title="Zertifikat widerrufen">Widerrufen</button> ';
     const renewBtn =
@@ -64,6 +66,7 @@ function renderCertTree(
       (isRevoked ? ' cert-tree__item--revoked' : '') +
       '"><span class="cert-tree__label">' +
       htmlEscapeFn(cert.domain) +
+      (cert.is_ev != null && cert.is_ev !== 0 ? ' <span class="cert-tree__badge cert-tree__badge--ev" title="Extended Validation">EV</span>' : '') +
       '</span><span class="cert-tree__meta">' +
       metaText +
       '</span><span class="cert-tree__actions">' +
@@ -439,6 +442,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     .btn-revoke { background: var(--gh-fg-muted); color: #fff; border-color: var(--gh-fg-muted); }
     .btn-revoke:hover { background: var(--gh-fg); border-color: var(--gh-fg); }
     .cert-tree__item--revoked .cert-tree__meta { text-decoration: line-through; color: var(--gh-danger); }
+    .cert-tree__badge { display: inline-block; padding: 2px 6px; font-size: 10px; font-weight: 600; border-radius: 4px; margin-left: 6px; vertical-align: middle; }
+    .cert-tree__badge--ev { background: var(--gh-accent); color: #fff; }
     .btn-view-cert, .btn-view-ca { background: var(--gh-accent); color: #fff; border-color: var(--gh-accent); }
     .btn-view-cert:hover, .btn-view-ca:hover { background: var(--gh-accent-hover); border-color: var(--gh-accent-hover); }
     code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; background: var(--gh-canvas-subtle); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--gh-border); }
@@ -1033,11 +1038,30 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           <option value="4096">4096 Bit</option>
         </select>
         <label>Hash-Algorithmus</label>
-        <select name="hashAlgo" style="width:100%;padding:8px;margin-bottom:16px;box-sizing:border-box">
+        <select name="hashAlgo" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
           <option value="sha256">SHA-256</option>
           <option value="sha384">SHA-384</option>
           <option value="sha512">SHA-512</option>
         </select>
+        <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px;cursor:pointer">
+          <input type="checkbox" name="ev" id="certCreateEv" value="1" style="width:auto">
+          <span>EV-Zertifikat (Extended Validation)</span>
+        </label>
+        <div id="certCreateEvFields" style="display:none;margin-bottom:12px;padding:12px;background:var(--gh-canvas-subtle);border-radius:6px;border:1px solid var(--gh-border-default)">
+          <p style="margin:0 0 10px;font-size:13px;font-weight:600">OID (PEN)</p>
+          <label style="font-size:12px">Basis-ID (PEN)</label>
+          <input type="text" name="policyOidBase" id="certCreatePolicyOidBase" placeholder="z. B. 1.3.6.1.4.1.52357" style="width:100%;padding:8px;margin-bottom:4px;box-sizing:border-box">
+          <p style="margin:0 0 8px;font-size:11px;color:var(--gh-fg-muted)">Deine IANA Enterprise Number findest du im IANA-Register unter <a href="https://pen.iana.org" target="_blank" rel="noopener noreferrer" style="color:var(--gh-accent-fg)">pen.iana.org</a>.</p>
+          <label style="font-size:12px">Sub-ID</label>
+          <input type="text" name="policyOidSub" id="certCreatePolicyOidSub" placeholder="z. B. .1.1" style="width:100%;padding:8px;margin-bottom:10px;box-sizing:border-box">
+          <p style="margin:0 0 10px;font-size:13px;font-weight:600">EV-Subject-Felder</p>
+          <label style="font-size:12px">businessCategory</label>
+          <input type="text" name="businessCategory" id="certCreateBusinessCategory" placeholder="z. B. Private Organization" style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box">
+          <label style="font-size:12px">jurisdictionCountryName</label>
+          <input type="text" name="jurisdictionCountryName" id="certCreateJurisdictionCountryName" placeholder="z. B. DE" style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box">
+          <label style="font-size:12px">serialNumber (Handelsregisternummer oder N/A)</label>
+          <input type="text" name="serialNumber" id="certCreateSerialNumber" placeholder="z. B. HRB 12345 oder N/A" style="width:100%;padding:8px;margin-bottom:0;box-sizing:border-box">
+        </div>
         <div id="certCreateSuccess" style="display:none;margin-bottom:12px;padding:12px;background:#e8f5e9;border-radius:6px;font-size:0.9em">
           <strong>Zertifikat erstellt.</strong>
           <p style="margin:8px 0 0 0"><a href="#" id="certCreateDownloadCert" class="btn" style="padding:4px 8px;font-size:0.85rem" download>Zertifikat herunterladen</a>
@@ -1543,11 +1567,13 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         var isRevoked = cert.revoked !== undefined && cert.revoked !== 0;
         var isExpired = cert.not_after ? new Date(cert.not_after) < new Date() : false;
         var isAcme = cert.ca_certificate_id != null && cert.ca_certificate_id !== 0;
-        var metaText = (isRevoked ? 'Widerrufen · Gültig bis ' + validUntil : 'Gültig bis ' + validUntil) + (isAcme ? ' · ACME' : '');
+        var isEv = cert.is_ev != null && cert.is_ev !== 0;
+        var metaText = (isRevoked ? 'Widerrufen · Gültig bis ' + validUntil : 'Gültig bis ' + validUntil) + (isAcme ? ' · ACME' : '') + (isEv ? ' · EV' : '');
         var revokeBtn = (isRevoked || isExpired) ? '' : '<button type="button" class="btn btn-revoke" data-cert-id="' + cert.id + '" title="Zertifikat widerrufen">Widerrufen</button> ';
         var renewBtn = (isRevoked || isAcme) ? '' : '<button type="button" class="btn btn-renew" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscape(cert.domain) + '" title="Zertifikat erneuern">Erneuern</button> ';
         var actions = '<button type="button" class="btn btn-view-cert" data-cert-id="' + cert.id + '" data-cert-domain="' + attrEscape(cert.domain) + '" data-cert-not-after="' + attrEscape(validUntil) + '" data-cert-created-at="' + attrEscape(createdAt) + '" data-cert-issuer="' + attrEscape(issuerName) + '" title="Details anzeigen">View</button> ' + (cert.has_pem ? '<a href="/api/cert/download?id=' + cert.id + '" class="btn" download>Zertifikat</a> <a href="/api/cert/key?id=' + cert.id + '" class="btn" download>Schlüssel</a> ' : '') + revokeBtn + renewBtn + '<button type="button" class="btn btn-delete" data-cert-id="' + cert.id + '" title="Zertifikat löschen">Löschen</button>';
-        return '<li class="cert-tree__item cert-tree__item--depth-' + depth + (isRevoked ? ' cert-tree__item--revoked' : '') + '"><span class="cert-tree__label">' + htmlEscape(cert.domain) + '</span><span class="cert-tree__meta">' + metaText + '</span><span class="cert-tree__actions">' + actions + '</span></li>';
+        var evBadge = isEv ? ' <span class="cert-tree__badge cert-tree__badge--ev" title="Extended Validation">EV</span>' : '';
+        return '<li class="cert-tree__item cert-tree__item--depth-' + depth + (isRevoked ? ' cert-tree__item--revoked' : '') + '"><span class="cert-tree__label">' + htmlEscape(cert.domain) + evBadge + '</span><span class="cert-tree__meta">' + metaText + '</span><span class="cert-tree__actions">' + actions + '</span></li>';
       }
       function togglerRow(depth, label, meta, actions) {
         return '<div class="cert-tree__item cert-tree__item--depth-' + depth + ' cert-tree__toggler" role="button" tabindex="0" aria-expanded="true"><span class="cert-tree__toggle" aria-hidden="true">▼</span><span class="cert-tree__label">' + label + '</span><span class="cert-tree__meta">' + meta + '</span><span class="cert-tree__actions">' + actions + '</span></div>';
@@ -2164,8 +2190,19 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         sel.appendChild(opt);
       }
       document.getElementById('certCreateSuccess').style.display = 'none';
+      var evCheck = document.getElementById('certCreateEv');
+      var evFields = document.getElementById('certCreateEvFields');
+      if (evCheck) { evCheck.checked = false; }
+      if (evFields) { evFields.style.display = 'none'; }
       document.getElementById('certCreateModal').classList.add('open');
     }
+    (function certCreateEvToggle() {
+      var evCheck = document.getElementById('certCreateEv');
+      var evFields = document.getElementById('certCreateEvFields');
+      if (evCheck && evFields) {
+        evCheck.addEventListener('change', function() { evFields.style.display = this.checked ? 'block' : 'none'; });
+      }
+    })();
     var certRenewConfirmBtn = document.getElementById('certRenewConfirmBtn');
     if (certRenewConfirmBtn) {
       certRenewConfirmBtn.addEventListener('click', function() {
@@ -2192,13 +2229,23 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       var validityDays = parseInt((form && form.elements.validityDays && form.elements.validityDays.value) || '365', 10) || 365;
       var keySize = parseInt((form && form.elements.keySize && form.elements.keySize.value) || '2048', 10) || 2048;
       var hashAlgo = (form && form.elements.hashAlgo && form.elements.hashAlgo.value) || 'sha256';
+      var ev = !!(form && form.elements.ev && form.elements.ev.checked);
+      var body = { issuerId: issuerId, domain: domain, sanDomains: sanDomains, validityDays: validityDays, keySize: keySize, hashAlgo: hashAlgo };
+      if (ev) {
+        body.ev = true;
+        body.policyOidBase = (form.elements.policyOidBase && form.elements.policyOidBase.value) ? form.elements.policyOidBase.value.trim() : '';
+        body.policyOidSub = (form.elements.policyOidSub && form.elements.policyOidSub.value) ? form.elements.policyOidSub.value.trim() : '';
+        body.businessCategory = (form.elements.businessCategory && form.elements.businessCategory.value) ? form.elements.businessCategory.value.trim() : '';
+        body.jurisdictionCountryName = (form.elements.jurisdictionCountryName && form.elements.jurisdictionCountryName.value) ? form.elements.jurisdictionCountryName.value.trim() : '';
+        body.serialNumber = (form.elements.serialNumber && form.elements.serialNumber.value) ? form.elements.serialNumber.value.trim() : '';
+      }
       var btn = document.getElementById('certCreateSubmitBtn');
       if (btn) { btn.disabled = true; btn.textContent = 'Wird erstellt…'; }
       try {
         var res = await fetch('/api/cert/create', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ issuerId: issuerId, domain: domain, sanDomains: sanDomains, validityDays: validityDays, keySize: keySize, hashAlgo: hashAlgo })
+          body: JSON.stringify(body)
         });
         var data = await res.json().catch(function() { return {}; });
         if (!res.ok) {

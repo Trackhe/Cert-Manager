@@ -43,6 +43,7 @@ export interface SummaryData {
     issuer_id: string | null;
     revoked: number;
     ca_certificate_id: number | null;
+    is_ev: number;
   }>;
   cas: Array<{
     id: string;
@@ -120,6 +121,7 @@ export function getSummaryData(
 
   const certificates = database.prepare(
     `SELECT c.id, c.domain, c.not_after, c.created_at, (c.pem IS NOT NULL) as has_pem, c.issuer_id, c.ca_certificate_id,
+            COALESCE(c.is_ev, 0) AS is_ev,
             (SELECT 1 FROM revoked_certificates r WHERE r.cert_id = c.id) AS revoked
      FROM certificates c ORDER BY c.id DESC`
   ).all() as Array<{
@@ -130,6 +132,7 @@ export function getSummaryData(
     has_pem: number;
     issuer_id: string | null;
     ca_certificate_id: number | null;
+    is_ev: number;
     revoked: number | null;
   }>;
   const certificatesNormalized = certificates.map((c) => ({

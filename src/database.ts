@@ -172,6 +172,8 @@ export function runMigrations(
   ensureColumn(database, 'certificates', 'pem', 'TEXT');
   ensureColumn(database, 'certificates', 'issuer_id', 'TEXT');
   ensureColumn(database, 'certificates', 'ca_certificate_id', 'INTEGER');
+  ensureColumn(database, 'certificates', 'is_ev', 'INTEGER DEFAULT 0');
+  ensureColumn(database, 'certificates', 'certificate_policy_oid', 'TEXT');
   ensureColumn(database, 'cas', 'not_after', 'DATETIME');
   ensureColumn(database, 'ca_challenges', 'accepted_at', 'INTEGER');
 

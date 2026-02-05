@@ -404,11 +404,18 @@ async function handleCertCreate(context: ApiContext): Promise<Response> {
     const sanDomains = Array.isArray(body.sanDomains)
       ? body.sanDomains.map((value) => String(value).trim().toLowerCase()).filter(Boolean)
       : [];
+    const ev = body.ev === true;
     const certificateId = createLeafCertificate(database, paths, issuerId, domain, {
       sanDomains,
       validityDays: body.validityDays,
       keySize: body.keySize,
       hashAlgorithm: body.hashAlgo,
+      ev,
+      policyOidBase: ev ? (body.policyOidBase as string | undefined) : undefined,
+      policyOidSub: ev ? (body.policyOidSub as string | undefined) : undefined,
+      businessCategory: ev ? (body.businessCategory as string | undefined) : undefined,
+      jurisdictionCountryName: ev ? (body.jurisdictionCountryName as string | undefined) : undefined,
+      serialNumber: ev ? (body.serialNumber as string | undefined) : undefined,
     });
     logger.info('Zertifikat erstellt', { certId: certificateId, domain, issuerId, sanDomains: sanDomains.length ? sanDomains : undefined });
     return Response.json({ ok: true, id: certificateId });
