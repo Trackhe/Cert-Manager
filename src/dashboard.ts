@@ -444,6 +444,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     .cert-tree__item--revoked .cert-tree__meta { text-decoration: line-through; color: var(--gh-danger); }
     .cert-tree__badge { display: inline-block; padding: 2px 6px; font-size: 10px; font-weight: 600; border-radius: 4px; margin-left: 6px; vertical-align: middle; }
     .cert-tree__badge--ev { background: var(--gh-accent); color: #fff; }
+    .cert-view-modal { max-width: 720px; width: 90%; }
+    .cert-view-modal #certViewDl dd { min-width: 0; overflow-wrap: break-word; word-break: break-word; }
     .btn-view-cert, .btn-view-ca { background: var(--gh-accent); color: #fff; border-color: var(--gh-accent); }
     .btn-view-cert:hover, .btn-view-ca:hover { background: var(--gh-accent-hover); border-color: var(--gh-accent-hover); }
     code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; background: var(--gh-canvas-subtle); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--gh-border); }
@@ -615,8 +617,11 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       <div class="setup-card">
         <h3>Eigene CA</h3>
         <div id="caNotConfigured">
-          <p>Root-CA per Knopfdruck einrichten. Danach können ACME-Clients (z. B. Reverse-Proxys) Zertifikate von dieser CA anfordern.</p>
-          <button type="button" class="btn" onclick="document.getElementById('caModal').classList.add('open')">CA erstellen</button>
+          <p>Root-CA per Knopfdruck einrichten oder eine bestehende CA (Zertifikat + Schlüssel im PEM-Format) hochladen. Danach können ACME-Clients (z. B. Reverse-Proxys) Zertifikate von dieser CA anfordern.</p>
+          <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+            <button type="button" class="btn" onclick="document.getElementById('caModal').classList.add('open')">CA erstellen</button>
+            <button type="button" class="btn" onclick="openCaUploadModal()">CA hochladen</button>
+          </div>
         </div>
         <div id="caConfigured" style="display:none">
           <p>In deinem Reverse-Proxy oder ACME-Client die <strong>Directory-URL</strong> eintragen und das <strong>CA-Zertifikat</strong> als vertrauenswürdige CA hinterlegen – dann können Zertifikate von dieser CA angefordert werden.</p>
@@ -627,14 +632,18 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
             <button type="button" class="btn" onclick="document.getElementById('caModal').classList.add('open')">CA hinzufügen</button>
+            <button type="button" class="btn" onclick="openCaUploadModal()">CA hochladen</button>
             <button type="button" class="btn" onclick="openIntermediateModal()">Intermediate-CA erstellen</button>
           </div>
         </div>
       </div>
       <div class="setup-card">
         <h3>Zertifikate erstellen</h3>
-        <p style="margin-bottom:12px">Domain-Zertifikat über die eingerichtete CA ausstellen.</p>
-        <button type="button" class="btn" onclick="openCertCreateModal()">Zertifikat erstellen</button>
+        <p style="margin-bottom:12px">Domain-Zertifikat über die eingerichtete CA ausstellen oder bestehendes Zertifikat hochladen.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <button type="button" class="btn" onclick="openCertCreateModal()">Zertifikat erstellen</button>
+          <button type="button" class="btn" onclick="openCertUploadModal()">Zertifikat hochladen</button>
+        </div>
       </div>
     </div>
     </div>
@@ -971,7 +980,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
   </div>
 
   <div id="certViewModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certViewModalTitle" onclick="if(event.target===this) closeModal('certViewModal')">
-    <div class="modal cert-view-modal" onclick="event.stopPropagation()" style="max-width:560px">
+    <div class="modal cert-view-modal" onclick="event.stopPropagation()" style="max-width:720px">
       <h3 id="certViewModalTitle">Zertifikat-Details</h3>
       <dl id="certViewDl" style="display:grid;grid-template-columns:auto 1fr;gap:8px 16px;margin:0 0 16px;font-size:14px">
         <dt class="cert-view-cert-only" style="color:var(--gh-fg-muted);margin:0">Domain</dt>
@@ -1002,6 +1011,12 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         <dd style="margin:0" id="certViewKeyInfo">—</dd>
         <dt style="color:var(--gh-fg-muted);margin:0">Signaturalgorithmus</dt>
         <dd style="margin:0" id="certViewSignatureAlgorithm">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">X509v3 Basic Constraints</dt>
+        <dd style="margin:0" id="certViewBasicConstraints">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">X509v3 Subject Key Identifier</dt>
+        <dd style="margin:0" id="certViewSubjectKeyIdentifier">—</dd>
+        <dt style="color:var(--gh-fg-muted);margin:0">X509v3 Key Usage</dt>
+        <dd style="margin:0" id="certViewKeyUsage">—</dd>
         <dt class="cert-view-cert-only" style="color:var(--gh-fg-muted);margin:0">Subject Alt Names</dt>
         <dd class="cert-view-cert-only" style="margin:0" id="certViewSan">—</dd>
         <dt style="color:var(--gh-fg-muted);margin:0">Erstellt am</dt>
@@ -1030,12 +1045,28 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         <input type="text" name="domain" id="certCreateDomain" placeholder="z. B. example.com" required style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
         <label>Weitere Domains (SAN, kommagetrennt, optional)</label>
         <input type="text" name="sanDomains" id="certCreateSan" placeholder="www.example.com, api.example.com" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+        <p style="margin:12px 0 6px;font-size:13px;font-weight:600;color:var(--gh-fg-muted)">Subject-Details (optional)</p>
+        <label style="font-size:13px">Organisation (O)</label>
+        <input type="text" name="organization" id="certCreateOrganization" placeholder="z. B. Meine Firma GmbH" style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box">
+        <label style="font-size:13px">Organisationseinheit (OU)</label>
+        <input type="text" name="organizationalUnit" id="certCreateOu" placeholder="z. B. IT" style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box">
+        <label style="font-size:13px">Land (C)</label>
+        <input type="text" name="country" id="certCreateCountry" placeholder="z. B. DE" maxlength="2" style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box">
+        <label style="font-size:13px">Ort (L)</label>
+        <input type="text" name="locality" id="certCreateLocality" placeholder="z. B. Berlin" style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box">
+        <label style="font-size:13px">Bundesland (ST)</label>
+        <input type="text" name="stateOrProvince" id="certCreateState" placeholder="z. B. Berlin" style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box">
+        <label style="font-size:13px">E-Mail</label>
+        <input type="email" name="email" id="certCreateEmail" placeholder="optional" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
         <label>Gültigkeit (Tage)</label>
         <input type="number" name="validityDays" value="365" min="1" max="825" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
-        <label>Schlüssellänge</label>
-        <select name="keySize" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
-          <option value="2048">2048 Bit</option>
-          <option value="4096">4096 Bit</option>
+        <label>Schlüsselart</label>
+        <select name="keyAlgorithm" id="certCreateKeyAlgorithm" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+          <option value="rsa-2048">RSA 2048 Bit</option>
+          <option value="rsa-3072">RSA 3072 Bit</option>
+          <option value="rsa-4096">RSA 4096 Bit</option>
+          <option value="ec-p256">ECDSA P-256</option>
+          <option value="ec-p384">ECDSA P-384</option>
         </select>
         <label>Hash-Algorithmus</label>
         <select name="hashAlgo" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
@@ -1065,11 +1096,67 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         <div id="certCreateSuccess" style="display:none;margin-bottom:12px;padding:12px;background:#e8f5e9;border-radius:6px;font-size:0.9em">
           <strong>Zertifikat erstellt.</strong>
           <p style="margin:8px 0 0 0"><a href="#" id="certCreateDownloadCert" class="btn" style="padding:4px 8px;font-size:0.85rem" download>Zertifikat herunterladen</a>
-          <a href="#" id="certCreateDownloadKey" class="btn" style="padding:4px 8px;font-size:0.85rem;margin-left:4px" download>Schlüssel herunterladen</a></p>
+          <a href="#" id="certCreateDownloadKey" class="btn" style="padding:4px 8px;font-size:0.85rem;margin-left:4px" download>Schlüssel herunterladen</a>
+          <a href="#" id="certCreateViewDetails" class="btn btn-view-cert" style="padding:4px 8px;font-size:0.85rem;margin-left:4px" data-cert-id="">Details anzeigen</a></p>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" onclick="closeModal('certCreateModal')">Abbrechen</button>
           <button type="submit" class="btn" id="certCreateSubmitBtn">Zertifikat erstellen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="caUploadModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="caUploadModalTitle" onclick="if(event.target===this) closeModal('caUploadModal')">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:520px">
+      <h3 id="caUploadModalTitle">CA hochladen</h3>
+      <form id="caUploadForm" onsubmit="submitCaUpload(event); return false;">
+        <label>Typ</label>
+        <select name="caUploadType" id="caUploadType" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+          <option value="root">Root-CA</option>
+          <option value="intermediate">Intermediate-CA</option>
+        </select>
+        <div id="caUploadParentWrap" style="display:none;margin-bottom:12px">
+          <label>Übergeordnete CA (Parent)</label>
+          <select name="caUploadParentId" id="caUploadParentId" style="width:100%;padding:8px;box-sizing:border-box">
+            <option value="">– Bitte wählen –</option>
+          </select>
+        </div>
+        <label>Anzeigename (optional)</label>
+        <input type="text" name="caUploadName" id="caUploadName" placeholder="z. B. Meine CA" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+        <label>Zertifikat (PEM)</label>
+        <textarea name="caUploadCertPem" id="caUploadCertPem" rows="6" placeholder="-----BEGIN CERTIFICATE-----&#10;..." style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px" required></textarea>
+        <label>Privatschlüssel (PEM)</label>
+        <textarea name="caUploadKeyPem" id="caUploadKeyPem" rows="5" placeholder="-----BEGIN PRIVATE KEY-----&#10;..." style="width:100%;padding:8px;margin-bottom:16px;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px" required></textarea>
+        <div id="caUploadSuccess" style="display:none;margin-bottom:12px;padding:12px;background:#e8f5e9;border-radius:6px;font-size:0.9em">
+          <strong>CA hochgeladen.</strong> <span id="caUploadSuccessId"></span>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('caUploadModal')">Abbrechen</button>
+          <button type="submit" class="btn" id="caUploadSubmitBtn">Hochladen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="certUploadModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="certUploadModalTitle" onclick="if(event.target===this) closeModal('certUploadModal')">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:520px">
+      <h3 id="certUploadModalTitle">Zertifikat hochladen</h3>
+      <form id="certUploadForm" onsubmit="submitCertUpload(event); return false;">
+        <label>Ausstellende CA (optional)</label>
+        <select name="certUploadIssuerId" id="certUploadIssuerId" style="width:100%;padding:8px;margin-bottom:12px;box-sizing:border-box">
+          <option value="">– Keine / Unbekannt –</option>
+        </select>
+        <label>Zertifikat (PEM)</label>
+        <textarea name="certUploadCertPem" id="certUploadCertPem" rows="6" placeholder="-----BEGIN CERTIFICATE-----&#10;..." style="width:100%;padding:8px;margin-bottom:8px;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px" required></textarea>
+        <label>Privatschlüssel (PEM)</label>
+        <textarea name="certUploadKeyPem" id="certUploadKeyPem" rows="5" placeholder="-----BEGIN PRIVATE KEY-----&#10;..." style="width:100%;padding:8px;margin-bottom:16px;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px" required></textarea>
+        <div id="certUploadSuccess" style="display:none;margin-bottom:12px;padding:12px;background:#e8f5e9;border-radius:6px;font-size:0.9em">
+          <strong>Zertifikat hochgeladen.</strong> <a href="#" id="certUploadDownloadCert" class="btn" style="padding:4px 8px;font-size:0.85rem;margin-left:4px" download>Zertifikat</a> <a href="#" id="certUploadDownloadKey" class="btn" style="padding:4px 8px;font-size:0.85rem;margin-left:4px" download>Schlüssel</a>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('certUploadModal')">Abbrechen</button>
+          <button type="submit" class="btn" id="certUploadSubmitBtn">Hochladen</button>
         </div>
       </form>
     </div>
@@ -1113,6 +1200,17 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     })();
     var initialData = { cas: [], intermediates: [], caConfigured: false };
     try { var idEl = document.getElementById('initialData'); if (idEl && idEl.textContent) initialData = JSON.parse(idEl.textContent); } catch (e) {}
+    function formatDnForDisplay(dnStr) {
+      if (dnStr == null || dnStr === '') return '—';
+      var parts = dnStr.split(', ');
+      function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+      return parts.map(esc).join('<br>');
+    }
+    function formatIssuerForDisplay(subject, issuer) {
+      if (issuer == null || issuer === '') return '—';
+      if (subject != null && subject === issuer) return 'Wie Subject (selbstsigniert)';
+      return formatDnForDisplay(issuer);
+    }
     var resizeAndDrawHoneycomb = function() {};
     (function navInit() {
       var STORAGE_KEY = 'cert-manager-section';
@@ -1350,8 +1448,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           }).then(function(d) {
             var fmt = function(v) { return v != null && v !== '' ? String(v) : '—'; };
             document.getElementById('certViewDomain').textContent = fmt(d.domain);
-            document.getElementById('certViewSubject').textContent = fmt(d.subject);
-            document.getElementById('certViewIssuer').textContent = fmt(d.issuer);
+            document.getElementById('certViewSubject').innerHTML = formatDnForDisplay(d.subject);
+            document.getElementById('certViewIssuer').innerHTML = formatIssuerForDisplay(d.subject, d.issuer);
             document.getElementById('certViewSerial').textContent = fmt(d.serialNumber);
             document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
             document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
@@ -1359,6 +1457,9 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
             document.getElementById('certViewKeyType').textContent = fmt(d.keyType);
             document.getElementById('certViewKeyInfo').textContent = fmt(d.keyInfo);
             document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
+            document.getElementById('certViewBasicConstraints').textContent = fmt(d.basicConstraints);
+            document.getElementById('certViewSubjectKeyIdentifier').textContent = fmt(d.subjectKeyIdentifier);
+            document.getElementById('certViewKeyUsage').textContent = fmt(d.keyUsage);
             document.getElementById('certViewSan').textContent = fmt(d.subjectAltName);
             document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
             document.getElementById('certViewId').textContent = fmt(d.id);
@@ -1408,8 +1509,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
             document.getElementById('certViewName').textContent = fmt(d.name);
             document.getElementById('certViewCommonName').textContent = fmt(d.commonName);
             document.getElementById('certViewParentCa').textContent = fmt(d.parentCaId);
-            document.getElementById('certViewSubject').textContent = fmt(d.subject);
-            document.getElementById('certViewIssuer').textContent = fmt(d.issuer);
+            document.getElementById('certViewSubject').innerHTML = formatDnForDisplay(d.subject);
+            document.getElementById('certViewIssuer').innerHTML = formatIssuerForDisplay(d.subject, d.issuer);
             document.getElementById('certViewSerial').textContent = fmt(d.serialNumber);
             document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
             document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
@@ -1417,6 +1518,9 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
             document.getElementById('certViewKeyType').textContent = fmt(d.keyType);
             document.getElementById('certViewKeyInfo').textContent = fmt(d.keyInfo);
             document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
+            document.getElementById('certViewBasicConstraints').textContent = fmt(d.basicConstraints);
+            document.getElementById('certViewSubjectKeyIdentifier').textContent = fmt(d.subjectKeyIdentifier);
+            document.getElementById('certViewKeyUsage').textContent = fmt(d.keyUsage);
             document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
             document.getElementById('certViewId').textContent = fmt(d.id);
             document.getElementById('certViewPem').textContent = d.pem || '—';
@@ -1977,8 +2081,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         }).then(function(d) {
           var fmt = function(v) { return v != null && v !== '' ? String(v) : '—'; };
           document.getElementById('certViewDomain').textContent = fmt(d.domain);
-          document.getElementById('certViewSubject').textContent = fmt(d.subject);
-          document.getElementById('certViewIssuer').textContent = fmt(d.issuer);
+          document.getElementById('certViewSubject').innerHTML = formatDnForDisplay(d.subject);
+          document.getElementById('certViewIssuer').innerHTML = formatIssuerForDisplay(d.subject, d.issuer);
           document.getElementById('certViewSerial').textContent = fmt(d.serialNumber);
           document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
           document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
@@ -1986,6 +2090,9 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           document.getElementById('certViewKeyType').textContent = fmt(d.keyType);
           document.getElementById('certViewKeyInfo').textContent = fmt(d.keyInfo);
           document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
+          document.getElementById('certViewBasicConstraints').textContent = fmt(d.basicConstraints);
+          document.getElementById('certViewSubjectKeyIdentifier').textContent = fmt(d.subjectKeyIdentifier);
+          document.getElementById('certViewKeyUsage').textContent = fmt(d.keyUsage);
           document.getElementById('certViewSan').textContent = fmt(d.subjectAltName);
           document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
           document.getElementById('certViewId').textContent = fmt(d.id);
@@ -2020,20 +2127,23 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           document.getElementById('certViewName').textContent = fmt(d.name);
           document.getElementById('certViewCommonName').textContent = fmt(d.commonName);
           document.getElementById('certViewParentCa').textContent = fmt(d.parentCaId);
-          document.getElementById('certViewSubject').textContent = fmt(d.subject);
-          document.getElementById('certViewIssuer').textContent = fmt(d.issuer);
+          document.getElementById('certViewSubject').innerHTML = formatDnForDisplay(d.subject);
+          document.getElementById('certViewIssuer').innerHTML = formatIssuerForDisplay(d.subject, d.issuer);
           document.getElementById('certViewSerial').textContent = fmt(d.serialNumber);
           document.getElementById('certViewNotBefore').textContent = fmt(d.notBefore);
           document.getElementById('certViewNotAfter').textContent = fmt(d.notAfter);
           document.getElementById('certViewFingerprint').textContent = fmt(d.fingerprint256);
           document.getElementById('certViewKeyType').textContent = fmt(d.keyType);
           document.getElementById('certViewKeyInfo').textContent = fmt(d.keyInfo);
-          document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
-          document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
-          document.getElementById('certViewId').textContent = fmt(d.id);
-          document.getElementById('certViewPem').textContent = d.pem || '—';
-          var dl = document.getElementById('certViewDownloads');
-          dl.innerHTML = '<a href="/api/ca-cert?id=' + encodeURIComponent(d.id) + '" class="btn" download>Zertifikat herunterladen</a>';
+            document.getElementById('certViewSignatureAlgorithm').textContent = fmt(d.signatureAlgorithm);
+            document.getElementById('certViewBasicConstraints').textContent = fmt(d.basicConstraints);
+            document.getElementById('certViewSubjectKeyIdentifier').textContent = fmt(d.subjectKeyIdentifier);
+            document.getElementById('certViewKeyUsage').textContent = fmt(d.keyUsage);
+            document.getElementById('certViewCreatedAt').textContent = d.createdAt ? new Date(d.createdAt).toLocaleString() : '—';
+            document.getElementById('certViewId').textContent = fmt(d.id);
+            document.getElementById('certViewPem').textContent = d.pem || '—';
+            var dl = document.getElementById('certViewDownloads');
+            dl.innerHTML = '<a href="/api/ca-cert?id=' + encodeURIComponent(d.id) + '" class="btn" download>Zertifikat herunterladen</a>';
         }).catch(function(err) { showError(err && err.message ? err.message : 'Laden fehlgeschlagen'); document.getElementById('certViewPem').textContent = '—'; });
         return;
       }
@@ -2203,6 +2313,114 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         evCheck.addEventListener('change', function() { evFields.style.display = this.checked ? 'block' : 'none'; });
       }
     })();
+    function openCaUploadModal() {
+      var typeSel = document.getElementById('caUploadType');
+      var parentWrap = document.getElementById('caUploadParentWrap');
+      var parentSel = document.getElementById('caUploadParentId');
+      if (parentWrap) parentWrap.style.display = (typeSel && typeSel.value === 'intermediate') ? 'block' : 'none';
+      if (parentSel) {
+        parentSel.innerHTML = '<option value="">– Bitte wählen –</option>';
+        (initialData.cas || []).forEach(function(c) {
+          var opt = document.createElement('option');
+          opt.value = c.id;
+          opt.textContent = c.name + (c.commonName && c.commonName !== c.name ? ' (' + c.commonName + ')' : '');
+          parentSel.appendChild(opt);
+        });
+      }
+      document.getElementById('caUploadSuccess').style.display = 'none';
+      document.getElementById('caUploadForm').reset();
+      document.getElementById('caUploadModal').classList.add('open');
+    }
+    (function caUploadTypeToggle() {
+      var typeSel = document.getElementById('caUploadType');
+      var parentWrap = document.getElementById('caUploadParentWrap');
+      if (typeSel && parentWrap) {
+        typeSel.addEventListener('change', function() { parentWrap.style.display = this.value === 'intermediate' ? 'block' : 'none'; });
+      }
+    })();
+    function openCertUploadModal() {
+      var sel = document.getElementById('certUploadIssuerId');
+      if (sel) {
+        sel.innerHTML = '<option value="">– Keine / Unbekannt –</option>';
+        (initialData.cas || []).forEach(function(c) {
+          var opt = document.createElement('option');
+          opt.value = c.id;
+          opt.textContent = c.name + (c.commonName && c.commonName !== c.name ? ' (' + c.commonName + ')' : '') + ' (Root)';
+          sel.appendChild(opt);
+        });
+        (initialData.intermediates || []).forEach(function(c) {
+          var opt = document.createElement('option');
+          opt.value = c.id;
+          opt.textContent = (c.name || c.id) + ' (Intermediate)';
+          sel.appendChild(opt);
+        });
+      }
+      document.getElementById('certUploadSuccess').style.display = 'none';
+      document.getElementById('certUploadForm').reset();
+      document.getElementById('certUploadModal').classList.add('open');
+    }
+    async function submitCaUpload(ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      var type = document.getElementById('caUploadType').value;
+      var certPem = (document.getElementById('caUploadCertPem').value || '').trim();
+      var keyPem = (document.getElementById('caUploadKeyPem').value || '').trim();
+      var name = (document.getElementById('caUploadName').value || '').trim();
+      var body = { type: type, certPem: certPem, keyPem: keyPem };
+      if (name) body.name = name;
+      if (type === 'intermediate') {
+        var parentId = (document.getElementById('caUploadParentId').value || '').trim();
+        if (!parentId) { showError('Bitte übergeordnete CA wählen.'); return false; }
+        body.parentCaId = parentId;
+      }
+      var btn = document.getElementById('caUploadSubmitBtn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Wird hochgeladen…'; }
+      try {
+        var res = await fetch('/api/ca/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        var data = await res.json().catch(function() { return {}; });
+        if (!res.ok) {
+          if (btn) { btn.disabled = false; btn.textContent = 'Hochladen'; }
+          showError('Fehler: ' + (data.error || res.statusText));
+          return false;
+        }
+        document.getElementById('caUploadSuccess').style.display = 'block';
+        document.getElementById('caUploadSuccessId').textContent = 'ID: ' + data.id;
+        if (btn) { btn.disabled = false; btn.textContent = 'Hochladen'; }
+        setTimeout(function() { closeModal('caUploadModal'); location.reload(); }, 1500);
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Hochladen'; }
+        showError(e && e.message ? e.message : String(e));
+      }
+      return false;
+    }
+    async function submitCertUpload(ev) {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      var certPem = (document.getElementById('certUploadCertPem').value || '').trim();
+      var keyPem = (document.getElementById('certUploadKeyPem').value || '').trim();
+      var issuerId = (document.getElementById('certUploadIssuerId').value || '').trim() || null;
+      var body = { certPem: certPem, keyPem: keyPem };
+      if (issuerId) body.issuerId = issuerId;
+      var btn = document.getElementById('certUploadSubmitBtn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Wird hochgeladen…'; }
+      try {
+        var res = await fetch('/api/cert/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        var data = await res.json().catch(function() { return {}; });
+        if (!res.ok) {
+          if (btn) { btn.disabled = false; btn.textContent = 'Hochladen'; }
+          showError('Fehler: ' + (data.error || res.statusText));
+          return false;
+        }
+        var certId = data.id;
+        document.getElementById('certUploadSuccess').style.display = 'block';
+        document.getElementById('certUploadDownloadCert').href = '/api/cert/download?id=' + certId;
+        document.getElementById('certUploadDownloadKey').href = '/api/cert/key?id=' + certId;
+        if (btn) { btn.disabled = false; btn.textContent = 'Hochladen'; }
+        setTimeout(function() { closeModal('certUploadModal'); location.reload(); }, 1500);
+      } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Hochladen'; }
+        showError(e && e.message ? e.message : String(e));
+      }
+      return false;
+    }
     var certRenewConfirmBtn = document.getElementById('certRenewConfirmBtn');
     if (certRenewConfirmBtn) {
       certRenewConfirmBtn.addEventListener('click', function() {
@@ -2227,10 +2445,22 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
       var sanRaw = (form && form.elements.sanDomains && form.elements.sanDomains.value) ? form.elements.sanDomains.value : '';
       var sanDomains = sanRaw.split(/[,\\s]+/).map(function(s) { return s.trim().toLowerCase(); }).filter(Boolean);
       var validityDays = parseInt((form && form.elements.validityDays && form.elements.validityDays.value) || '365', 10) || 365;
-      var keySize = parseInt((form && form.elements.keySize && form.elements.keySize.value) || '2048', 10) || 2048;
+      var keyAlgorithm = (form && form.elements.keyAlgorithm && form.elements.keyAlgorithm.value) || 'rsa-2048';
       var hashAlgo = (form && form.elements.hashAlgo && form.elements.hashAlgo.value) || 'sha256';
       var ev = !!(form && form.elements.ev && form.elements.ev.checked);
-      var body = { issuerId: issuerId, domain: domain, sanDomains: sanDomains, validityDays: validityDays, keySize: keySize, hashAlgo: hashAlgo };
+      var body = { issuerId: issuerId, domain: domain, sanDomains: sanDomains, validityDays: validityDays, keyAlgorithm: keyAlgorithm, hashAlgo: hashAlgo };
+      var org = (form && form.elements.organization && form.elements.organization.value) ? form.elements.organization.value.trim() : '';
+      var ou = (form && form.elements.organizationalUnit && form.elements.organizationalUnit.value) ? form.elements.organizationalUnit.value.trim() : '';
+      var country = (form && form.elements.country && form.elements.country.value) ? form.elements.country.value.trim() : '';
+      var locality = (form && form.elements.locality && form.elements.locality.value) ? form.elements.locality.value.trim() : '';
+      var stateOrProvince = (form && form.elements.stateOrProvince && form.elements.stateOrProvince.value) ? form.elements.stateOrProvince.value.trim() : '';
+      var email = (form && form.elements.email && form.elements.email.value) ? form.elements.email.value.trim() : '';
+      if (org) body.organization = org;
+      if (ou) body.organizationalUnit = ou;
+      if (country) body.country = country;
+      if (locality) body.locality = locality;
+      if (stateOrProvince) body.stateOrProvince = stateOrProvince;
+      if (email) body.email = email;
       if (ev) {
         body.ev = true;
         body.policyOidBase = (form.elements.policyOidBase && form.elements.policyOidBase.value) ? form.elements.policyOidBase.value.trim() : '';
@@ -2257,6 +2487,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         document.getElementById('certCreateSuccess').style.display = 'block';
         document.getElementById('certCreateDownloadCert').href = '/api/cert/download?id=' + certId;
         document.getElementById('certCreateDownloadKey').href = '/api/cert/key?id=' + certId;
+        var detailsLink = document.getElementById('certCreateViewDetails');
+        if (detailsLink) { detailsLink.setAttribute('data-cert-id', String(certId)); }
         if (btn) { btn.disabled = false; btn.textContent = 'Zertifikat erstellen'; }
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = 'Zertifikat erstellen'; }
@@ -2407,10 +2639,8 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           ? '<tr><td colspan="3" class="empty-table">Keine Zuordnungen. Standard-CA wird verwendet.</td></tr>'
           : assign.map(function(a) { return '<tr data-pattern="' + attrEscape(a.domainPattern) + '"><td><code>' + htmlEscape(a.domainPattern) + '</code></td><td>' + htmlEscape(caDisplayName(a.caId)) + '</td><td><button type="button" class="btn btn-delete btn-delete-acme-ca-assignment" data-pattern="' + attrEscape(a.domainPattern) + '" title="Zuordnung löschen">Löschen</button></td></tr>'; }).join('');
       }
-      var acmeDefaultIntermediateSelect = document.getElementById('acmeDefaultIntermediateSelect');
-      if (acmeDefaultIntermediateSelect && d.activeAcmeIntermediateId !== undefined) {
-        acmeDefaultIntermediateSelect.value = d.activeAcmeIntermediateId || '';
-      }
+      // Standard-Intermediate-Dropdown nicht per SSE überschreiben, damit die Nutzerauswahl
+      // nicht sofort wieder verschwindet; Wert kommt beim Laden und nach Reload (nach Speichern).
       if (d.defaultCommonNameRoot) initialData.defaultCommonNameRoot = d.defaultCommonNameRoot;
       if (d.defaultCommonNameIntermediate) initialData.defaultCommonNameIntermediate = d.defaultCommonNameIntermediate;
       (function updateStats() {

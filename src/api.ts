@@ -1,6 +1,16 @@
 import * as crypto from 'node:crypto';
 import type { Database } from 'bun:sqlite';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  BasicConstraintsExtension,
+  KeyUsageFlags,
+  KeyUsagesExtension,
+  SubjectAlternativeNameExtension,
+  SubjectKeyIdentifierExtension,
+  X509Certificate as PeculiarX509,
+} from '@peculiar/x509';
+// @ts-expect-error no types
+import * as forge from 'node-forge';
 import {
   createRootCa,
   createIntermediateCa,
@@ -43,6 +53,12 @@ export type CertInfoParsed = {
   keyInfo: string | null;
   /** z. B. RSA-SHA256, ECDSA-SHA256 */
   signatureAlgorithm: string | null;
+  /** X509v3 Basic Constraints, z. B. "CA:TRUE" */
+  basicConstraints?: string | null;
+  /** X509v3 Subject Key Identifier (Hex mit Doppelpunkten) */
+  subjectKeyIdentifier?: string | null;
+  /** X509v3 Key Usage, z. B. "Certificate Sign, CRL Sign" */
+  keyUsage?: string | null;
 };
 
 function parseCertInfo(pem: string): CertInfoParsed | null {
@@ -80,6 +96,273 @@ function parseCertInfo(pem: string): CertInfoParsed | null {
       signatureAlgorithm: sigAlg ?? null,
     };
   } catch {
+    const fromForge = certInfoFromForgeCert(pem);
+    if (fromForge) return fromForge;
+    return certInfoFromPeculiar(pem);
+  }
+}
+
+/** RFC 2253: Sonderzeichen in DN-Werten escapen. */
+function escapeRfc2253Value(value: string): string {
+  if (!value.length) return value;
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (c === '\\' || c === ',' || c === '+' || c === '"' || c === ';' || c === '<' || c === '>' || c === '=') {
+      out += '\\' + c;
+    } else if (i === 0 && c === '#') {
+      out += '\\#';
+    } else if (c === ' ' && (i === 0 || i === value.length - 1)) {
+      out += '\\ ';
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+/** RFC 2253 Reihenfolge (most significant first): C, ST, L, O, OU, CN, Rest. Short-Namen für Anzeige. */
+const RFC2253_ORDER: Record<string, number> = {
+  C: 0,
+  countryName: 0,
+  ST: 1,
+  stateOrProvinceName: 1,
+  L: 2,
+  localityName: 2,
+  O: 3,
+  organizationName: 3,
+  OU: 4,
+  organizationalUnitName: 4,
+  CN: 5,
+  commonName: 5,
+};
+
+function dnToRfc2253(attrs: Array<{ shortName?: string; name?: string; value: string }>): string {
+  const sorted = [...attrs].sort((a, b) => {
+    const keyA = (a.shortName || a.name || '').trim();
+    const keyB = (b.shortName || b.name || '').trim();
+    const orderA = keyA in RFC2253_ORDER ? RFC2253_ORDER[keyA] : 99;
+    const orderB = keyB in RFC2253_ORDER ? RFC2253_ORDER[keyB] : 99;
+    if (orderA !== orderB) return orderA - orderB;
+    return keyA.localeCompare(keyB);
+  });
+  return sorted
+    .map((a) => {
+      const name = (a.shortName || a.name || '').trim();
+      if (!name) return '';
+      return name + '=' + escapeRfc2253Value(a.value);
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+/** Baut CertInfoParsed aus einem node-forge Zertifikat (Fallback wenn Node X509Certificate scheitert). */
+function certInfoFromForgeCert(pem: string): CertInfoParsed | null {
+  try {
+    const cert = forge.pki.certificateFromPem(pem);
+    const subjectAttrs = (cert.subject.attributes || []) as Array<{ shortName?: string; name?: string; value: string }>;
+    const issuerAttrs = (cert.issuer.attributes || []) as Array<{ shortName?: string; name?: string; value: string }>;
+    const subject = dnToRfc2253(subjectAttrs);
+    const issuer = dnToRfc2253(issuerAttrs);
+    const notBefore = cert.validity.notBefore instanceof Date ? cert.validity.notBefore.toISOString() : String(cert.validity.notBefore ?? '');
+    const notAfter = cert.validity.notAfter instanceof Date ? cert.validity.notAfter.toISOString() : String(cert.validity.notAfter ?? '');
+    let fingerprint256 = '';
+    try {
+      const fp = forge.pki.getPublicKeyFingerprint(cert.publicKey, {
+        md: forge.md.sha256.create(),
+        type: 'SubjectPublicKeyInfo',
+        encoding: 'hex',
+        delimiter: ':',
+      }) as string;
+      fingerprint256 = typeof fp === 'string' ? fp.toUpperCase() : '';
+    } catch {
+      // ignore
+    }
+    let subjectAltName: string | null = null;
+    const sanExt = (cert.extensions || []).find(
+      (e: { name?: string; id?: string }) => e.name === 'subjectAltName' || e.id === '2.5.29.17'
+    ) as { altNames?: Array<{ type: number; value: string }> } | undefined;
+    if (sanExt?.altNames?.length) {
+      subjectAltName = sanExt.altNames
+        .map((a) => (a.type === 2 ? 'DNS' : a.type === 1 ? 'email' : 'URI') + ':' + a.value)
+        .join(', ');
+    }
+    let keyType: string | null = null;
+    let keyInfo: string | null = null;
+    const pk = cert.publicKey as { n?: unknown; e?: unknown };
+    if (pk && typeof (pk as { n?: { bitLength?: () => number } }).n === 'object') {
+      keyType = 'RSA';
+      const n = (cert.publicKey as { n?: { bitLength?: () => number } }).n;
+      if (n?.bitLength) keyInfo = n.bitLength() + ' Bit';
+      else keyInfo = 'RSA';
+    } else {
+      keyType = 'EC';
+      keyInfo = 'EC';
+    }
+    const sigOid = (cert as { signatureOid?: string }).signatureOid;
+    const sigNames: Record<string, string> = {
+      '1.2.840.113549.1.1.5': 'RSA-SHA1',
+      '1.2.840.113549.1.1.11': 'RSA-SHA256',
+      '1.2.840.113549.1.1.12': 'RSA-SHA384',
+      '1.2.840.113549.1.1.13': 'RSA-SHA512',
+    };
+    const signatureAlgorithm = (sigOid && sigNames[sigOid]) || sigOid || null;
+    const serialHex = (cert.serialNumber ?? '').toString();
+    const serialNumber =
+      serialHex && /^[0-9a-fA-F]+$/.test(serialHex)
+        ? BigInt('0x' + serialHex).toString(10) + ' (0x' + serialHex + ')'
+        : serialHex || '—';
+
+    let basicConstraints: string | null = null;
+    let subjectKeyIdentifier: string | null = null;
+    let keyUsage: string | null = null;
+    const exts = (cert.extensions || []) as Array<{
+      name?: string;
+      id?: string;
+      critical?: boolean;
+      cA?: boolean;
+      pathLenConstraint?: number;
+      subjectKeyIdentifier?: string;
+      digitalSignature?: boolean;
+      keyEncipherment?: boolean;
+      keyCertSign?: boolean;
+      cRLSign?: boolean;
+      nonRepudiation?: boolean;
+      dataEncipherment?: boolean;
+      keyAgreement?: boolean;
+      encipherOnly?: boolean;
+      decipherOnly?: boolean;
+    }>;
+    for (const e of exts) {
+      if (e.name === 'basicConstraints' || e.id === '2.5.29.19') {
+        const ca = e.cA === true;
+        const pathLen = e.pathLenConstraint;
+        basicConstraints = 'CA:' + (ca ? 'TRUE' : 'FALSE') + (pathLen !== undefined ? ', pathlen:' + pathLen : '');
+        break;
+      }
+    }
+    for (const e of exts) {
+      if (e.name === 'subjectKeyIdentifier' || e.id === '2.5.29.14') {
+        const hex = (e as { subjectKeyIdentifier?: string }).subjectKeyIdentifier;
+        if (hex && typeof hex === 'string') {
+          subjectKeyIdentifier = hex.replace(/(.{2})/g, '$1:').replace(/:$/, '').toUpperCase();
+        }
+        break;
+      }
+    }
+    const kuExt = exts.find((e) => e.name === 'keyUsage' || e.id === '2.5.29.15');
+    if (kuExt) {
+      const labels: string[] = [];
+      if (kuExt.digitalSignature) labels.push('Digital Signature');
+      if (kuExt.nonRepudiation) labels.push('Non Repudiation');
+      if (kuExt.keyEncipherment) labels.push('Key Encipherment');
+      if (kuExt.dataEncipherment) labels.push('Data Encipherment');
+      if (kuExt.keyAgreement) labels.push('Key Agreement');
+      if (kuExt.keyCertSign) labels.push('Certificate Sign');
+      if (kuExt.cRLSign) labels.push('CRL Sign');
+      if (kuExt.encipherOnly) labels.push('Encipher Only');
+      if (kuExt.decipherOnly) labels.push('Decipher Only');
+      if (labels.length) keyUsage = labels.join(', ');
+    }
+
+    return {
+      subject: subject || '—',
+      issuer: issuer || '—',
+      serialNumber: serialNumber || '—',
+      notBefore,
+      notAfter,
+      fingerprint256,
+      subjectAltName,
+      keyType,
+      keyInfo,
+      signatureAlgorithm,
+      basicConstraints: basicConstraints ?? undefined,
+      subjectKeyIdentifier: subjectKeyIdentifier ?? undefined,
+      keyUsage: keyUsage ?? undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Fallback für von @peculiar/x509 erzeugte Zertifikate (z. B. ECDSA-Leaf). */
+function certInfoFromPeculiar(pem: string): CertInfoParsed | null {
+  try {
+    const cert = new PeculiarX509(pem);
+    const notBefore = cert.notBefore instanceof Date ? cert.notBefore.toISOString() : String(cert.notBefore ?? '');
+    const notAfter = cert.notAfter instanceof Date ? cert.notAfter.toISOString() : String(cert.notAfter ?? '');
+    let fingerprint256 = '';
+    try {
+      const derMatch = pem.replace(/\r/g, '').match(/-----BEGIN CERTIFICATE-----[\s]*([A-Za-z0-9+/=]+)[\s]*-----END CERTIFICATE-----/);
+      if (derMatch) {
+        const der = Buffer.from(derMatch[1], 'base64');
+        const hash = crypto.createHash('sha256').update(der).digest('hex');
+        fingerprint256 = hash.replace(/(.{2})/g, '$1:').replace(/:$/, '').toUpperCase();
+      }
+    } catch {
+      // ignore
+    }
+    const sigAlg = cert.signatureAlgorithm as { name?: string; hash?: string } | undefined;
+    const signatureAlgorithm =
+      sigAlg?.name && sigAlg?.hash ? `${sigAlg.name}-${sigAlg.hash.replace('SHA-', 'SHA')}` : sigAlg?.name ?? null;
+    const serialHex = cert.serialNumber ?? '';
+    const serialNumber =
+      serialHex && /^[0-9a-fA-F]+$/.test(serialHex)
+        ? BigInt('0x' + serialHex).toString(10) + ' (0x' + serialHex + ')'
+        : serialHex || '—';
+    let subjectAltName: string | null = null;
+    const sanExt = cert.getExtension(SubjectAlternativeNameExtension);
+    if (sanExt?.names?.items?.length) {
+      subjectAltName = sanExt.names.items.map((n) => (n.type === 'dns' ? 'DNS' : n.type) + ':' + (n.value ?? '')).join(', ');
+    }
+    const alg = cert.publicKey?.algorithm as { name?: string; namedCurve?: string } | undefined;
+    const keyType = alg?.name === 'ECDSA' ? 'EC' : alg?.name === 'RSA' ? 'RSA' : alg?.name ?? null;
+    const keyInfo = alg?.namedCurve ?? (keyType === 'RSA' ? 'RSA' : keyType) ?? null;
+    let basicConstraints: string | null = null;
+    const bcExt = cert.getExtension(BasicConstraintsExtension);
+    if (bcExt) {
+      const ca = (bcExt as { ca?: boolean }).ca === true;
+      const pathLen = (bcExt as { pathLength?: number }).pathLength;
+      basicConstraints = 'CA:' + (ca ? 'TRUE' : 'FALSE') + (pathLen !== undefined ? ', pathlen:' + pathLen : '');
+    }
+    let subjectKeyIdentifier: string | null = null;
+    const skiExt = cert.getExtension(SubjectKeyIdentifierExtension);
+    if (skiExt && (skiExt as { keyId?: string }).keyId) {
+      const hex = (skiExt as { keyId: string }).keyId;
+      subjectKeyIdentifier = hex.replace(/(.{2})/g, '$1:').replace(/:$/, '').toUpperCase();
+    }
+    let keyUsage: string | null = null;
+    const kuExt = cert.getExtension(KeyUsagesExtension);
+    if (kuExt && typeof (kuExt as { usages: number }).usages === 'number') {
+      const u = (kuExt as { usages: number }).usages;
+      const labels: string[] = [];
+      if (u & KeyUsageFlags.digitalSignature) labels.push('Digital Signature');
+      if (u & KeyUsageFlags.nonRepudiation) labels.push('Non Repudiation');
+      if (u & KeyUsageFlags.keyEncipherment) labels.push('Key Encipherment');
+      if (u & KeyUsageFlags.dataEncipherment) labels.push('Data Encipherment');
+      if (u & KeyUsageFlags.keyAgreement) labels.push('Key Agreement');
+      if (u & KeyUsageFlags.keyCertSign) labels.push('Certificate Sign');
+      if (u & KeyUsageFlags.cRLSign) labels.push('CRL Sign');
+      if (u & KeyUsageFlags.encipherOnly) labels.push('Encipher Only');
+      if (u & KeyUsageFlags.decipherOnly) labels.push('Decipher Only');
+      if (labels.length) keyUsage = labels.join(', ');
+    }
+    return {
+      subject: cert.subject || '—',
+      issuer: cert.issuer || '—',
+      serialNumber,
+      notBefore,
+      notAfter,
+      fingerprint256,
+      subjectAltName,
+      keyType,
+      keyInfo,
+      signatureAlgorithm,
+      basicConstraints: basicConstraints ?? undefined,
+      subjectKeyIdentifier: subjectKeyIdentifier ?? undefined,
+      keyUsage: keyUsage ?? undefined,
+    };
+  } catch {
     return null;
   }
 }
@@ -92,6 +375,62 @@ function slugFromName(name: string): string {
       .replace(/\s+/g, '-')
       .replace(/[^a-z0-9-]/g, '') || 'ca-' + crypto.randomBytes(4).toString('hex')
   );
+}
+
+/** Extrahiert den ersten CN-Wert aus einem X.509-Subject-String (z. B. "CN=Meine CA, O=Org"). */
+function getCnFromSubject(subject: string): string {
+  const match = subject.match(/CN=([^,]+)/i);
+  return match ? match[1].trim() : subject.trim() || 'Unbekannt';
+}
+
+/**
+ * Parst ein Zertifikat-PEM für Upload (Subject + notAfter).
+ * Versucht zuerst Node X509Certificate, bei Fehler node-forge (akzeptiert mehr Formate).
+ */
+function parseCertForUpload(pem: string): { subject: string; notAfter: string } | null {
+  try {
+    const x = new X509Certificate(pem);
+    return { subject: x.subject, notAfter: x.validTo };
+  } catch {
+    try {
+      const cert = forge.pki.certificateFromPem(pem);
+      const attrs = cert.subject.attributes as Array<{ shortName?: string; name?: string; value: string }>;
+      const subject = attrs.map((a) => (a.shortName || a.name || '') + '=' + a.value).join(', ');
+      const notAfter = cert.validity.notAfter as Date;
+      const notAfterStr = notAfter instanceof Date ? notAfter.toISOString() : String(notAfter);
+      return { subject, notAfter: notAfterStr };
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** Normalisiert PEM (Zeilenumbrüche) und gibt ggf. nur den ersten Block zurück (z. B. erstes Zertifikat). */
+function normalizePem(pem: string, blockLabel = 'CERTIFICATE'): string {
+  const normalized = pem.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  const begin = `-----BEGIN ${blockLabel}-----`;
+  const end = `-----END ${blockLabel}-----`;
+  const beginIdx = normalized.indexOf(begin);
+  if (beginIdx === -1) return normalized;
+  const endIdx = normalized.indexOf(end, beginIdx);
+  if (endIdx === -1) return normalized;
+  return normalized.slice(beginIdx, endIdx + end.length);
+}
+
+/** Normalisiert Key-PEM und extrahiert den ersten Schlüsselblock (PRIVATE KEY, RSA PRIVATE KEY, EC PRIVATE KEY). */
+function normalizeKeyPem(pem: string): string {
+  const normalized = pem.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  const keyTypes = ['PRIVATE KEY', 'RSA PRIVATE KEY', 'EC PRIVATE KEY'];
+  for (const keyType of keyTypes) {
+    const begin = `-----BEGIN ${keyType}-----`;
+    const end = `-----END ${keyType}-----`;
+    const beginIdx = normalized.indexOf(begin);
+    if (beginIdx !== -1) {
+      const endIdx = normalized.indexOf(end, beginIdx);
+      if (endIdx !== -1) return normalized.slice(beginIdx, endIdx + end.length);
+    }
+  }
+  return normalized;
 }
 
 /** Liefert die numerische Query-Param-ID oder null bei fehlendem/ungültigem Wert. */
@@ -327,6 +666,77 @@ async function handleCaActivate(context: ApiContext): Promise<Response> {
   return Response.json({ ok: true });
 }
 
+async function handleCaUpload(context: ApiContext): Promise<Response> {
+  const { database, paths, request } = context;
+  try {
+    const body = (await request.json()) as {
+      type: 'root' | 'intermediate';
+      certPem: string;
+      keyPem: string;
+      name?: string;
+      parentCaId?: string;
+    };
+    const type = body.type;
+    const certPemRaw = typeof body.certPem === 'string' ? body.certPem : '';
+    const keyPemRaw = typeof body.keyPem === 'string' ? body.keyPem : '';
+    if (!certPemRaw.trim()) return Response.json({ error: 'certPem fehlt' }, { status: 400 });
+    if (!keyPemRaw.trim()) return Response.json({ error: 'keyPem fehlt (Schlüssel erforderlich für die CA)' }, { status: 400 });
+    if (type !== 'root' && type !== 'intermediate') {
+      return Response.json({ error: 'type muss "root" oder "intermediate" sein' }, { status: 400 });
+    }
+    if (type === 'intermediate' && !(body.parentCaId ?? '').trim()) {
+      return Response.json({ error: 'parentCaId fehlt für Intermediate-CA' }, { status: 400 });
+    }
+    const certPem = normalizePem(certPemRaw);
+    const keyPem = normalizeKeyPem(keyPemRaw);
+    const info = parseCertForUpload(certPem);
+    if (!info) {
+      return Response.json(
+        { error: 'Ungültiges Zertifikat. Bitte prüfen Sie das PEM-Format (-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----).' },
+        { status: 400 }
+      );
+    }
+    const commonName = getCnFromSubject(info.subject);
+    const displayName = (body.name ?? '').trim() || commonName;
+    const slug = slugFromName(displayName);
+    const existingRoot = database.prepare('SELECT 1 FROM cas WHERE id = ?').get(slug);
+    const existingInt = database.prepare('SELECT 1 FROM intermediate_cas WHERE id = ?').get(slug);
+    const finalId = existingRoot || existingInt ? slug + '-' + Date.now().toString(36) : slug;
+    const notAfter = info.notAfter;
+    if (type === 'root') {
+      const parentCaId = (body.parentCaId ?? '').trim();
+      if (parentCaId) return Response.json({ error: 'parentCaId darf bei Root-CA nicht gesetzt sein' }, { status: 400 });
+      writeFileSync(paths.caCertPath(finalId), certPem);
+      writeFileSync(paths.caKeyPath(finalId), keyPem);
+      database.prepare(
+        'INSERT INTO cas (id, name, common_name, not_after, created_at) VALUES (?, ?, ?, ?, datetime("now"))'
+      ).run(finalId, displayName, commonName, notAfter);
+      if (!getActiveCaId(database)) {
+        database.prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)').run(CONFIG_KEY_ACTIVE_CA_ID, finalId);
+      }
+      logger.info('Root-CA hochgeladen', { caId: finalId, name: displayName });
+      return Response.json({ ok: true, id: finalId, type: 'root' });
+    }
+    const parentCaId = (body.parentCaId ?? '').trim();
+    const parentRow = database.prepare('SELECT 1 FROM cas WHERE id = ?').get(parentCaId);
+    if (!parentRow) return Response.json({ error: 'Parent-CA nicht gefunden' }, { status: 404 });
+    if (!existsSync(paths.caCertPath(parentCaId))) {
+      return Response.json({ error: 'Parent-CA Zertifikat nicht gefunden' }, { status: 404 });
+    }
+    writeFileSync(paths.intermediateCertPath(finalId), certPem);
+    writeFileSync(paths.intermediateKeyPath(finalId), keyPem);
+    database.prepare(
+      'INSERT INTO intermediate_cas (id, parent_ca_id, name, common_name, not_after, created_at) VALUES (?, ?, ?, ?, ?, datetime("now"))'
+    ).run(finalId, parentCaId, displayName, commonName, notAfter);
+    logger.info('Intermediate-CA hochgeladen', { intermediateId: finalId, parentCaId, name: displayName });
+    return Response.json({ ok: true, id: finalId, type: 'intermediate' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('CA upload error:', message);
+    return Response.json({ error: message }, { status: 400 });
+  }
+}
+
 async function handleCaIntermediate(context: ApiContext): Promise<Response> {
   const { database, paths, request } = context;
   try {
@@ -394,7 +804,15 @@ async function handleCertCreate(context: ApiContext): Promise<Response> {
       sanDomains?: string[];
       validityDays?: number;
       keySize?: number;
+      /** Schlüsselart: rsa-2048, rsa-3072, rsa-4096 (hat Vorrang vor keySize) */
+      keyAlgorithm?: string;
       hashAlgo?: string;
+      organization?: string;
+      organizationalUnit?: string;
+      country?: string;
+      locality?: string;
+      stateOrProvince?: string;
+      email?: string;
     };
     const issuerId = (body.issuerId ?? '').trim();
     const domain = (body.domain ?? '').trim().toLowerCase();
@@ -405,10 +823,15 @@ async function handleCertCreate(context: ApiContext): Promise<Response> {
       ? body.sanDomains.map((value) => String(value).trim().toLowerCase()).filter(Boolean)
       : [];
     const ev = body.ev === true;
-    const certificateId = createLeafCertificate(database, paths, issuerId, domain, {
+    const keyAlgorithm =
+      body.keyAlgorithm && ['rsa-2048', 'rsa-3072', 'rsa-4096', 'ec-p256', 'ec-p384'].includes(body.keyAlgorithm)
+        ? (body.keyAlgorithm as 'rsa-2048' | 'rsa-3072' | 'rsa-4096' | 'ec-p256' | 'ec-p384')
+        : undefined;
+    const certificateId = await createLeafCertificate(database, paths, issuerId, domain, {
       sanDomains,
       validityDays: body.validityDays,
       keySize: body.keySize,
+      keyAlgorithm,
       hashAlgorithm: body.hashAlgo,
       ev,
       policyOidBase: ev ? (body.policyOidBase as string | undefined) : undefined,
@@ -416,12 +839,64 @@ async function handleCertCreate(context: ApiContext): Promise<Response> {
       businessCategory: ev ? (body.businessCategory as string | undefined) : undefined,
       jurisdictionCountryName: ev ? (body.jurisdictionCountryName as string | undefined) : undefined,
       serialNumber: ev ? (body.serialNumber as string | undefined) : undefined,
+      organization: body.organization?.trim() || undefined,
+      organizationalUnit: body.organizationalUnit?.trim() || undefined,
+      country: body.country?.trim() || undefined,
+      locality: body.locality?.trim() || undefined,
+      stateOrProvince: body.stateOrProvince?.trim() || undefined,
+      email: body.email?.trim() || undefined,
     });
     logger.info('Zertifikat erstellt', { certId: certificateId, domain, issuerId, sanDomains: sanDomains.length ? sanDomains : undefined });
     return Response.json({ ok: true, id: certificateId });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('Cert create error:', message);
+    return Response.json({ error: message }, { status: 400 });
+  }
+}
+
+async function handleCertUpload(context: ApiContext): Promise<Response> {
+  const { database, paths, request } = context;
+  try {
+    const body = (await request.json()) as {
+      certPem: string;
+      keyPem: string;
+      issuerId?: string | null;
+    };
+    const certPemRaw = typeof body.certPem === 'string' ? body.certPem : '';
+    const keyPemRaw = typeof body.keyPem === 'string' ? body.keyPem : '';
+    if (!certPemRaw.trim()) return Response.json({ error: 'certPem fehlt' }, { status: 400 });
+    if (!keyPemRaw.trim()) return Response.json({ error: 'keyPem fehlt' }, { status: 400 });
+    const certPem = normalizePem(certPemRaw);
+    const keyPem = normalizeKeyPem(keyPemRaw);
+    const info = parseCertForUpload(certPem);
+    if (!info) {
+      return Response.json(
+        { error: 'Ungültiges Zertifikat. Bitte prüfen Sie das PEM-Format (-----BEGIN CERTIFICATE----- … -----END CERTIFICATE-----).' },
+        { status: 400 }
+      );
+    }
+    const domain = getCnFromSubject(info.subject);
+    const notAfter = info.notAfter;
+    const issuerId = (body.issuerId ?? '').trim() || null;
+    if (issuerId) {
+      const rootExists = database.prepare('SELECT 1 FROM cas WHERE id = ?').get(issuerId);
+      const intExists = database.prepare('SELECT 1 FROM intermediate_cas WHERE id = ?').get(issuerId);
+      if (!rootExists && !intExists) {
+        return Response.json({ error: 'Ausstellende CA (issuerId) nicht gefunden' }, { status: 400 });
+      }
+    }
+    database.prepare(
+      'INSERT INTO certificates (domain, not_after, created_at, pem, issuer_id, is_ev, certificate_policy_oid) VALUES (?, ?, datetime("now"), ?, ?, 0, NULL)'
+    ).run(domain, notAfter, certPem, issuerId);
+    const lastRow = database.prepare('SELECT last_insert_rowid() as id').get() as { id: number };
+    const certificateId = lastRow.id;
+    writeFileSync(paths.leafKeyPath(certificateId), keyPem);
+    logger.info('Zertifikat hochgeladen', { certId: certificateId, domain, issuerId });
+    return Response.json({ ok: true, id: certificateId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Cert upload error:', message);
     return Response.json({ error: message }, { status: 400 });
   }
 }
@@ -715,15 +1190,28 @@ async function handleAcmeChallengeAccept(context: ApiContext): Promise<Response>
 
 async function handleAcmeWhitelistPost(context: ApiContext): Promise<Response> {
   const { database, request } = context;
+  let body: { domain?: string };
   try {
-    const body = (await request.json()) as { domain?: string };
-    const domain = typeof body.domain === 'string' ? body.domain.trim().toLowerCase() : '';
-    if (!domain) return Response.json({ error: 'domain fehlt oder leer' }, { status: 400 });
-    const result = database.prepare('INSERT OR IGNORE INTO acme_whitelist_domains (domain) VALUES (?)').run(domain);
-    if (result.changes === 0) return Response.json({ error: 'Domain ist bereits in der Whitelist' }, { status: 400 });
+    const text = await request.text();
+    if (!text || !text.trim()) return Response.json({ error: 'Anfrage-Body fehlt' }, { status: 400 });
+    body = JSON.parse(text) as { domain?: string };
+  } catch (e) {
+    const msg = e instanceof SyntaxError ? 'Ungültiger JSON-Body' : 'Anfrage konnte nicht gelesen werden';
+    logger.warn('ACME-Whitelist POST: Body-Parse-Fehler', { err: e instanceof Error ? e.message : String(e) });
+    return Response.json({ error: msg }, { status: 400 });
+  }
+  const domain = typeof body.domain === 'string' ? body.domain.trim().toLowerCase() : '';
+  if (!domain) return Response.json({ error: 'domain fehlt oder leer' }, { status: 400 });
+  try {
+    const existing = database.prepare('SELECT 1 FROM acme_whitelist_domains WHERE domain = ?').get(domain);
+    if (existing) return Response.json({ error: 'Domain ist bereits in der Whitelist' }, { status: 400 });
+    database.prepare('INSERT INTO acme_whitelist_domains (domain) VALUES (?)').run(domain);
     logger.info('ACME-Whitelist: Domain hinzugefügt', { domain });
-  } catch {
-    return Response.json({ error: 'Ungültige Anfrage' }, { status: 400 });
+  } catch (e) {
+    const errMsg = e instanceof Error ? e.message : String(e);
+    if (errMsg.includes('UNIQUE') || errMsg.includes('unique')) return Response.json({ error: 'Domain ist bereits in der Whitelist' }, { status: 400 });
+    logger.warn('ACME-Whitelist POST: DB-Fehler', { domain, err: errMsg });
+    return Response.json({ error: 'Speichern fehlgeschlagen' }, { status: 500 });
   }
   return Response.json({ ok: true });
 }
@@ -733,9 +1221,9 @@ async function handleAcmeWhitelistDelete(context: ApiContext): Promise<Response>
   const id = parseIdParam(url);
   if (id === null) return Response.json({ error: 'id fehlt oder ungültig' }, { status: 400 });
   const row = database.prepare('SELECT domain FROM acme_whitelist_domains WHERE id = ?').get(id) as { domain: string } | undefined;
-  const result = database.prepare('DELETE FROM acme_whitelist_domains WHERE id = ?').run(id);
-  if (result.changes === 0) return Response.json({ error: 'Eintrag nicht gefunden' }, { status: 404 });
-  logger.info('ACME-Whitelist: Domain entfernt', { id, domain: row?.domain });
+  if (!row) return Response.json({ error: 'Eintrag nicht gefunden' }, { status: 404 });
+  database.prepare('DELETE FROM acme_whitelist_domains WHERE id = ?').run(id);
+  logger.info('ACME-Whitelist: Domain entfernt', { id, domain: row.domain });
   return Response.json({ ok: true });
 }
 
@@ -771,8 +1259,9 @@ async function handleAcmeCaAssignmentsDelete(context: ApiContext): Promise<Respo
   const pattern = url.searchParams.get('pattern') ?? '';
   const normalized = pattern.trim().toLowerCase();
   if (!normalized) return Response.json({ error: 'pattern fehlt' }, { status: 400 });
-  const result = database.prepare('DELETE FROM acme_ca_domain_assignments WHERE domain_pattern = ?').run(normalized);
-  if (result.changes === 0) return Response.json({ error: 'Eintrag nicht gefunden' }, { status: 404 });
+  const result = database.prepare('DELETE FROM acme_ca_domain_assignments WHERE domain_pattern = ?').run(normalized) as { changes?: number } | undefined;
+  const changes = result?.changes ?? 0;
+  if (changes === 0) return Response.json({ error: 'Eintrag nicht gefunden' }, { status: 404 });
   logger.info('ACME CA-Zuordnung entfernt', { domainPattern: normalized });
   return Response.json({ ok: true });
 }
@@ -817,9 +1306,11 @@ const API_ROUTES: Array<{
   { method: 'GET', path: '/api/stats/history', handler: handleStatsHistory },
   { method: 'GET', path: '/api/ca-cert', handler: handleCaCert },
   { method: 'POST', path: '/api/ca/setup', handler: handleCaSetup },
+  { method: 'POST', path: '/api/ca/upload', handler: handleCaUpload },
   { method: 'POST', path: '/api/ca/activate', handler: handleCaActivate },
   { method: 'POST', path: '/api/ca/intermediate', handler: handleCaIntermediate },
   { method: 'POST', path: '/api/cert/create', handler: handleCertCreate },
+  { method: 'POST', path: '/api/cert/upload', handler: handleCertUpload },
   { method: 'GET', path: '/api/cert/download', handler: handleCertDownload },
   { method: 'GET', path: '/api/cert/info', handler: handleCertInfo },
   { method: 'GET', path: '/api/cert/key', handler: handleCertKey },

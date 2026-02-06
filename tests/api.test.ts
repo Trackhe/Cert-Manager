@@ -474,6 +474,118 @@ describe('Challenges Delete', () => {
   });
 });
 
+describe('ACME Whitelist', () => {
+  test('POST /api/acme-whitelist fügt Domain hinzu', async () => {
+    const domain = 'whitelist-test-' + Date.now() + '.example.com';
+    const res = await handleRequest(req('POST', '/api/acme-whitelist', { domain }));
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { ok?: boolean };
+    expect(data.ok).toBe(true);
+    const row = database.prepare('SELECT id, domain FROM acme_whitelist_domains WHERE domain = ?').get(domain) as { id: number; domain: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row!.domain).toBe(domain);
+  });
+
+  test('POST /api/acme-whitelist mit Wildcard-Domain', async () => {
+    const domain = '*.wildcard-' + Date.now() + '.local';
+    const res = await handleRequest(req('POST', '/api/acme-whitelist', { domain }));
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { ok?: boolean };
+    expect(data.ok).toBe(true);
+    const row = database.prepare('SELECT domain FROM acme_whitelist_domains WHERE domain = ?').get(domain) as { domain: string } | undefined;
+    expect(row?.domain).toBe(domain);
+  });
+
+  test('POST /api/acme-whitelist gleiche Domain zweimal liefert 400', async () => {
+    const domain = 'duplicate-whitelist-' + Date.now() + '.example.com';
+    const first = await handleRequest(req('POST', '/api/acme-whitelist', { domain }));
+    expect(first.status).toBe(200);
+    const second = await handleRequest(req('POST', '/api/acme-whitelist', { domain }));
+    expect(second.status).toBe(400);
+    const data = (await second.json()) as { error: string };
+    expect(data.error).toContain('bereits in der Whitelist');
+  });
+
+  test('POST /api/acme-whitelist ohne domain liefert 400', async () => {
+    const res = await handleRequest(req('POST', '/api/acme-whitelist', {}));
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toBeDefined();
+  });
+
+  test('POST /api/acme-whitelist mit leerem Body liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/acme-whitelist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '',
+      })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test('POST /api/acme-whitelist mit ungültigem JSON liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/acme-whitelist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: 'not json',
+      })
+    );
+    expect(res.status).toBe(400);
+    const data = (await res.json()) as { error: string };
+    expect(data.error).toBeDefined();
+  });
+
+  test('DELETE /api/acme-whitelist ohne id liefert 400', async () => {
+    const res = await handleRequest(new Request('http://localhost/api/acme-whitelist', { method: 'DELETE' }));
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /api/acme-whitelist?id=abc liefert 400', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/acme-whitelist?id=abc', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(400);
+  });
+
+  test('DELETE /api/acme-whitelist?id=999999 liefert 404', async () => {
+    const res = await handleRequest(
+      new Request('http://localhost/api/acme-whitelist?id=999999', { method: 'DELETE' })
+    );
+    expect(res.status).toBe(404);
+  });
+
+  test('DELETE /api/acme-whitelist löscht Eintrag', async () => {
+    const domain = 'delete-whitelist-' + Date.now() + '.example.com';
+    database.prepare('INSERT INTO acme_whitelist_domains (domain) VALUES (?)').run(domain);
+    const row = database.prepare('SELECT id FROM acme_whitelist_domains WHERE domain = ?').get(domain) as { id: number };
+    const res = await handleRequest(
+      new Request('http://localhost/api/acme-whitelist?id=' + row.id, { method: 'DELETE' })
+    );
+    expect(res.status).toBe(200);
+    const data = (await res.json()) as { ok?: boolean };
+    expect(data.ok).toBe(true);
+    const after = database.prepare('SELECT id FROM acme_whitelist_domains WHERE domain = ?').get(domain);
+    expect(after == null).toBe(true);
+  });
+
+  test('Hinzufügen und Löschen Roundtrip', async () => {
+    const domain = 'roundtrip-whitelist-' + Date.now() + '.local';
+    const addRes = await handleRequest(req('POST', '/api/acme-whitelist', { domain }));
+    expect(addRes.status).toBe(200);
+    const row = database.prepare('SELECT id FROM acme_whitelist_domains WHERE domain = ?').get(domain) as { id: number };
+    const delRes = await handleRequest(
+      new Request('http://localhost/api/acme-whitelist?id=' + row.id, { method: 'DELETE' })
+    );
+    expect(delRes.status).toBe(200);
+    const secondDel = await handleRequest(
+      new Request('http://localhost/api/acme-whitelist?id=' + row.id, { method: 'DELETE' })
+    );
+    expect(secondDel.status).toBe(404);
+  });
+});
+
 describe('CA Activate Erfolg', () => {
   test('nach Aktivierung liefert GET /api/ca-cert ohne id die aktivierte CA', async () => {
     expect(sharedCaId).not.toBeNull();
@@ -520,6 +632,34 @@ describe('Leaf-Zertifikat von Intermediate-CA', () => {
     const pem = await certRes.text();
     expect(pem).toContain('-----BEGIN CERTIFICATE-----');
     expect(pem).toContain('-----END CERTIFICATE-----');
+  });
+});
+
+describe('Leaf-Zertifikat ECDSA', () => {
+  test('Zertifikat mit ECDSA P-256 kann erstellt und heruntergeladen werden', async () => {
+    expect(sharedCaId).not.toBeNull();
+    const createRes = await handleRequest(
+      req('POST', '/api/cert/create', {
+        issuerId: sharedCaId!,
+        domain: 'ec-leaf.example.com',
+        validityDays: 90,
+        keyAlgorithm: 'ec-p256',
+        hashAlgo: 'sha256',
+      })
+    );
+    expect(createRes.status).toBe(200);
+    const createData = (await createRes.json()) as { ok: boolean; id: number };
+    expect(createData.ok).toBe(true);
+    expect(typeof createData.id).toBe('number');
+    const certRes = await handleRequest(req('GET', '/api/cert/download?id=' + createData.id));
+    expect(certRes.status).toBe(200);
+    const pem = await certRes.text();
+    expect(pem).toContain('-----BEGIN CERTIFICATE-----');
+    expect(pem).toContain('-----END CERTIFICATE-----');
+    const keyRes = await handleRequest(req('GET', '/api/cert/key?id=' + createData.id));
+    expect(keyRes.status).toBe(200);
+    const keyPem = await keyRes.text();
+    expect(keyPem).toContain('-----BEGIN PRIVATE KEY-----');
   });
 });
 
