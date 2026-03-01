@@ -19,6 +19,7 @@ import {
 } from './ca.js';
 import { createLeafCertificate } from './leaf-certificate.js';
 import {
+  CONFIG_KEY_ACME_DIRECTORY_BASE_URL,
   CONFIG_KEY_ACTIVE_ACME_INTERMEDIATE_ID,
   CONFIG_KEY_ACTIVE_CA_ID,
   CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE,
@@ -1266,6 +1267,73 @@ async function handleAcmeCaAssignmentsDelete(context: ApiContext): Promise<Respo
   return Response.json({ ok: true });
 }
 
+async function handleAcmeDirectoryUrlPost(context: ApiContext): Promise<Response> {
+  const { database, request } = context;
+  try {
+    const body = (await request.json()) as { baseUrl?: string | null };
+    const baseUrl =
+      body.baseUrl == null || String(body.baseUrl).trim() === ''
+        ? null
+        : String(body.baseUrl).trim().replace(/\/+$/, '');
+    if (baseUrl !== null && !/^https?:\/\//i.test(baseUrl)) {
+      return Response.json({ error: 'Basis-URL muss mit http:// oder https:// beginnen' }, { status: 400 });
+    }
+    if (baseUrl === null) {
+      database.prepare('DELETE FROM config WHERE key = ?').run(CONFIG_KEY_ACME_DIRECTORY_BASE_URL);
+    } else {
+      database
+        .prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)')
+        .run(CONFIG_KEY_ACME_DIRECTORY_BASE_URL, baseUrl);
+    }
+    logger.info('ACME Directory-Basis-URL gesetzt', { baseUrl: baseUrl ?? '(Aktuelle Seite)' });
+    return Response.json({ ok: true, baseUrl });
+  } catch {
+    return Response.json({ error: 'Ungültige Anfrage' }, { status: 400 });
+  }
+}
+
+async function handleAcmeCreateDirectoryCert(context: ApiContext): Promise<Response> {
+  const { database, paths, request } = context;
+  try {
+    const body = (await request.json()) as { hostname?: string };
+    const hostname = (body.hostname ?? 'localhost').toString().trim() || 'localhost';
+    const activeCaId = getActiveCaId(database);
+    if (!activeCaId) {
+      return Response.json({ error: 'Keine aktive CA. Bitte zuerst eine CA erstellen oder aktivieren.' }, { status: 400 });
+    }
+    const intermediateId = getActiveAcmeIntermediateId(database);
+    const issuerId = intermediateId ?? activeCaId;
+    const certificateId = await createLeafCertificate(database, paths, issuerId, hostname, {
+      sanDomains: [hostname],
+      validityDays: 365,
+    });
+    const certRow = database.prepare('SELECT pem FROM certificates WHERE id = ?').get(certificateId) as { pem: string } | undefined;
+    if (!certRow) {
+      return Response.json({ error: 'Zertifikat konnte nicht gelesen werden' }, { status: 500 });
+    }
+    const keyPath = paths.leafKeyPath(certificateId);
+    if (!existsSync(keyPath)) {
+      return Response.json({ error: 'Schlüsseldatei nicht gefunden' }, { status: 500 });
+    }
+    const keyPem = readFileSync(keyPath, 'utf8');
+    writeFileSync(paths.serverHttpsCertPath(), certRow.pem);
+    writeFileSync(paths.serverHttpsKeyPath(), keyPem);
+    logger.info('HTTPS-Server-Zertifikat gespeichert', { hostname });
+    return Response.json({
+      ok: true,
+      certPem: certRow.pem,
+      keyPem,
+      certId: certificateId,
+      directoryUrl: `https://${hostname}/acme/directory`,
+      httpsPortHint: 'Server neu starten – dann läuft HTTPS auf Port (Hauptport + 1)',
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.debug('create-directory-cert failed', { error: msg });
+    return Response.json({ error: msg }, { status: 400 });
+  }
+}
+
 async function handleAcmeDefaultIntermediateGet(context: ApiContext): Promise<Response> {
   const { database } = context;
   const id = getActiveAcmeIntermediateId(database);
@@ -1331,6 +1399,8 @@ const API_ROUTES: Array<{
   { method: 'DELETE', path: '/api/acme-ca-assignments', handler: handleAcmeCaAssignmentsDelete },
   { method: 'GET', path: '/api/acme-default-intermediate', handler: handleAcmeDefaultIntermediateGet },
   { method: 'POST', path: '/api/acme-default-intermediate', handler: handleAcmeDefaultIntermediatePost },
+  { method: 'POST', path: '/api/acme-directory-url', handler: handleAcmeDirectoryUrlPost },
+  { method: 'POST', path: '/api/acme/create-directory-cert', handler: handleAcmeCreateDirectoryCert },
 ];
 
 export async function handleApi(

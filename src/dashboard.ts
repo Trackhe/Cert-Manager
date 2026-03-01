@@ -176,8 +176,8 @@ function renderCertTree(
 }
 
 export function renderDashboard(database: Database, paths: PathHelpers): Response {
-  const { summary, challenges, acmeChallenges, acmeValidationStatus, acmeWhitelistDomains, acmeCaDomainAssignments, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate, certificates, cas, intermediates } = getSummaryData(database, paths);
-  const initialData = { cas, intermediates, certificates, caConfigured: summary.caConfigured, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate };
+  const { summary, challenges, acmeChallenges, acmeValidationStatus, acmeWhitelistDomains, acmeCaDomainAssignments, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate, certificates, cas, intermediates, acmeDirectoryBaseUrl } = getSummaryData(database, paths);
+  const initialData = { cas, intermediates, certificates, caConfigured: summary.caConfigured, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate, acmeDirectoryBaseUrl };
   const getCaDisplayName = (caId: string): string => {
     const root = cas.find((c) => c.id === caId);
     if (root) return root.name + (root.commonName !== root.name ? ' (' + root.commonName + ')' : '');
@@ -630,7 +630,16 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
             <code id="caDirectoryUrl"></code>
             <button type="button" class="btn btn-copy" id="copyDirectoryUrlBtn" aria-label="URL kopieren">Kopieren</button>
           </div>
+          <p style="margin:12px 0 6px;font-size:13px;color:var(--gh-fg-muted)">URL austauschen (z. B. für HTTPS oder andere Domain):</p>
+          <div class="directory-url-wrap" style="flex-wrap:wrap;align-items:center">
+            <input type="text" id="acmeDirectoryBaseUrlInput" placeholder="https://acme.example.com (leer = aktuelle Seite)" style="flex:1;min-width:200px;max-width:400px">
+            <button type="button" class="btn btn-secondary" id="saveDirectoryUrlBtn">Übernehmen</button>
+            <select id="acmeDirectoryFromCertSelect" style="max-width:220px" title="Basis-URL aus Zertifikat übernehmen">
+              <option value="">Aus Zertifikat übernehmen …</option>
+            </select>
+          </div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
+            <button type="button" class="btn" id="createDirectoryCertBtn">Zertifikat für HTTPS erstellen</button>
             <button type="button" class="btn" onclick="document.getElementById('caModal').classList.add('open')">CA hinzufügen</button>
             <button type="button" class="btn" onclick="openCaUploadModal()">CA hochladen</button>
             <button type="button" class="btn" onclick="openIntermediateModal()">Intermediate-CA erstellen</button>
@@ -976,6 +985,27 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           <button type="submit" class="btn" id="intermediateSubmitBtn">Intermediate-CA erstellen</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div id="directoryCertModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="directoryCertModalTitle" onclick="if(event.target===this) closeModal('directoryCertModal')">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:480px">
+      <h3 id="directoryCertModalTitle">Zertifikat für Directory-HTTPS erstellen</h3>
+      <p style="margin-bottom:12px;font-size:13px;color:var(--gh-fg-muted)">Erstellt ein von deiner CA signiertes Zertifikat für den angegebenen Hostnamen. Zertifikat und Schlüssel kannst du in deinem Reverse-Proxy (z. B. nginx) für HTTPS verwenden.</p>
+      <form id="directoryCertForm" onsubmit="submitDirectoryCert(event); return false;">
+        <label>Hostname (CN + SAN)</label>
+        <input type="text" name="hostname" id="directoryCertHostname" value="localhost" placeholder="localhost oder acme.example.com" required>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('directoryCertModal')">Abbrechen</button>
+          <button type="submit" class="btn" id="directoryCertSubmitBtn">Erstellen</button>
+        </div>
+      </form>
+      <div id="directoryCertResult" style="display:none;margin-top:16px;padding:12px;background:var(--gh-canvas-subtle);border-radius:6px;font-size:13px">
+        <p style="margin:0 0 8px"><strong>Zertifikat erstellt.</strong> Directory-URL: <code id="directoryCertResultUrl"></code></p>
+        <p style="margin:0 0 8px">Zertifikat und Schlüssel wurden gespeichert. Nach <strong>Neustart des Servers</strong> läuft HTTPS auf <strong>Port+1</strong> (z. B. https://localhost:3001).</p>
+        <p style="margin:0 0 8px">Schlüssel einmalig herunterladen:</p>
+        <p style="margin:0"><a href="#" id="directoryCertDownloadCert" class="btn" download>Zertifikat</a> <a href="#" id="directoryCertDownloadKey" class="btn" download>Schlüssel</a></p>
+      </div>
     </div>
   </div>
 
@@ -1383,7 +1413,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     function closeModal(id) { var el = document.getElementById(id); if (el) el.classList.remove('open'); }
     document.addEventListener('keydown', function(e) {
       if (e.key === 'Escape') {
-        ['caModal', 'intermediateModal', 'certCreateModal', 'certViewModal', 'certRenewModal'].forEach(closeModal);
+        ['caModal', 'intermediateModal', 'certCreateModal', 'certViewModal', 'certRenewModal', 'directoryCertModal'].forEach(closeModal);
       }
     });
     function copyDirectoryUrl() {
@@ -1396,14 +1426,113 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     }
     var copyBtn = document.getElementById('copyDirectoryUrlBtn');
     if (copyBtn) copyBtn.addEventListener('click', copyDirectoryUrl);
-    function updateCaCard(configured) {
+    var saveDirUrlBtn = document.getElementById('saveDirectoryUrlBtn');
+    if (saveDirUrlBtn) saveDirUrlBtn.addEventListener('click', saveDirectoryUrl);
+    var fromCertSelect = document.getElementById('acmeDirectoryFromCertSelect');
+    if (fromCertSelect) fromCertSelect.addEventListener('change', function() {
+      var val = this.value;
+      if (!val) return;
+      var input = document.getElementById('acmeDirectoryBaseUrlInput');
+      if (input) input.value = val;
+      fetch('/api/acme-directory-url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: val }) })
+        .then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d && d.error ? d.error : 'Fehler'); return d; }); })
+        .then(function() {
+          initialData.acmeDirectoryBaseUrl = val;
+          updateCaCard(initialData.caConfigured, initialData.acmeDirectoryBaseUrl);
+          this.selectedIndex = 0;
+        }.bind(this))
+        .catch(function(e) { showError(e && e.message ? e.message : 'Speichern fehlgeschlagen'); });
+    });
+    var createDirCertBtn = document.getElementById('createDirectoryCertBtn');
+    if (createDirCertBtn) createDirCertBtn.addEventListener('click', function() {
+      var form = document.getElementById('directoryCertForm');
+      var result = document.getElementById('directoryCertResult');
+      if (form) form.style.display = '';
+      if (result) result.style.display = 'none';
+      document.getElementById('directoryCertModal').classList.add('open');
+    });
+    function updateCaCard(configured, baseUrl) {
       var caNot = document.getElementById('caNotConfigured');
       var caYes = document.getElementById('caConfigured');
       if (caNot) caNot.style.display = configured ? 'none' : 'block';
       if (caYes) caYes.style.display = configured ? 'block' : 'none';
-      var url = configured ? window.location.origin + '/acme/directory' : '';
+      var origin = window.location.origin;
+      var base = (baseUrl != null && baseUrl !== '') ? baseUrl : origin;
+      var url = configured ? base + '/acme/directory' : '';
       var urlEl = document.getElementById('caDirectoryUrl');
       if (urlEl) urlEl.textContent = url;
+      var inputEl = document.getElementById('acmeDirectoryBaseUrlInput');
+      if (inputEl) inputEl.value = (baseUrl != null && baseUrl !== '') ? baseUrl : '';
+      var certSelect = document.getElementById('acmeDirectoryFromCertSelect');
+      if (certSelect && initialData.certificates) {
+        var opts = certSelect.querySelectorAll('option');
+        for (var i = 1; i < opts.length; i++) opts[i].remove();
+        var seen = {};
+        initialData.certificates.forEach(function(c) {
+          var d = c.domain;
+          if (!d || seen[d]) return;
+          seen[d] = true;
+          var opt = document.createElement('option');
+          opt.value = 'https://' + d;
+          opt.textContent = d;
+          certSelect.appendChild(opt);
+        });
+      }
+    }
+    function saveDirectoryUrl() {
+      var input = document.getElementById('acmeDirectoryBaseUrlInput');
+      var baseUrl = input ? input.value.trim() : '';
+      if (baseUrl !== '' && !/^https?:\\/\\//i.test(baseUrl)) {
+        showError('Basis-URL muss mit http:// oder https:// beginnen');
+        return;
+      }
+      var body = baseUrl === '' ? { baseUrl: null } : { baseUrl: baseUrl.replace(/\\/+$/, '') };
+      fetch('/api/acme-directory-url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+        .then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d && d.error ? d.error : 'Fehler'); return d; }); })
+        .then(function() {
+          initialData.acmeDirectoryBaseUrl = body.baseUrl;
+          updateCaCard(initialData.caConfigured, initialData.acmeDirectoryBaseUrl);
+          showError(''); var t = document.getElementById('toast'); if (t) t.classList.remove('show');
+        })
+        .catch(function(e) { showError(e && e.message ? e.message : 'Speichern fehlgeschlagen'); });
+    }
+    function submitDirectoryCert(ev) {
+      ev.preventDefault();
+      var form = document.getElementById('directoryCertForm');
+      var hostname = form && form.elements.hostname ? form.elements.hostname.value.trim() : 'localhost';
+      if (!hostname) hostname = 'localhost';
+      var btn = document.getElementById('directoryCertSubmitBtn');
+      if (btn) btn.disabled = true;
+      fetch('/api/acme/create-directory-cert', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ hostname: hostname }) })
+        .then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d && d.error ? d.error : 'Fehler'); return d; }); })
+        .then(function(d) {
+          var result = document.getElementById('directoryCertResult');
+          var urlEl = document.getElementById('directoryCertResultUrl');
+          if (urlEl) urlEl.textContent = d.directoryUrl || ('https://' + hostname + '/acme/directory');
+          var certLink = document.getElementById('directoryCertDownloadCert');
+          var keyLink = document.getElementById('directoryCertDownloadKey');
+          if (certLink && d.certPem) {
+            certLink.href = 'data:application/x-pem-file;base64,' + btoa(unescape(encodeURIComponent(d.certPem)));
+            certLink.download = hostname + '-cert.pem';
+          }
+          if (keyLink && d.keyPem) {
+            keyLink.href = 'data:application/x-pem-file;base64,' + btoa(unescape(encodeURIComponent(d.keyPem)));
+            keyLink.download = hostname + '-key.pem';
+          }
+          if (result) result.style.display = 'block';
+          if (form) form.style.display = 'none';
+          var baseUrl = 'https://' + hostname;
+          initialData.acmeDirectoryBaseUrl = baseUrl;
+          initialData.certificates = initialData.certificates || [];
+          initialData.certificates.unshift({ id: d.certId, domain: hostname });
+          updateCaCard(initialData.caConfigured, initialData.acmeDirectoryBaseUrl);
+          return fetch('/api/acme-directory-url', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseUrl: baseUrl }) });
+        })
+        .then(function(r) {
+          if (r && !r.ok) return r.json().then(function(d) { throw new Error(d && d.error ? d.error : 'URL speichern fehlgeschlagen'); });
+        })
+        .catch(function(e) { showError(e && e.message ? e.message : 'Erstellen fehlgeschlagen'); })
+        .finally(function() { if (btn) btn.disabled = false; });
     }
     setInterval(function updateAcmeCountdowns() {
       document.querySelectorAll('.acme-validation-countdown').forEach(function(span) {
@@ -1654,7 +1783,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           .finally(function() { acmeDefaultIntermediateForm.querySelector('button[type="submit"]').disabled = false; });
       });
     }
-    updateCaCard(initialData.caConfigured);
+    updateCaCard(initialData.caConfigured, initialData.acmeDirectoryBaseUrl);
     function buildCertTreeHtml(certs, casList, intList) {
       function getIssuerName(issuerId, cas, ints) {
         if (!issuerId) return '—';
@@ -2527,7 +2656,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
           return false;
         }
         closeModal('caModal');
-        updateCaCard(true);
+        updateCaCard(true, initialData.acmeDirectoryBaseUrl);
         location.reload();
       } catch (e) {
         if (btn) { btn.disabled = false; btn.textContent = 'CA erstellen'; }
@@ -2575,7 +2704,7 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
         urlEl.textContent = '';
         labelEl.style.display = 'none';
       }
-      if (s.caConfigured !== undefined) updateCaCard(s.caConfigured);
+      if (s.caConfigured !== undefined) updateCaCard(s.caConfigured, initialData.acmeDirectoryBaseUrl);
       if (d.cas) initialData.cas = d.cas;
       if (d.intermediates) initialData.intermediates = d.intermediates;
       updateCertTree(d.certificates || [], initialData.cas || [], initialData.intermediates || []);

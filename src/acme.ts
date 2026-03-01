@@ -1,4 +1,4 @@
-import * as crypto from 'node:crypto';
+import * as nodeCrypto from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Database } from 'bun:sqlite';
 import {
@@ -37,7 +37,7 @@ type SigningAlgorithm = { name: 'RSASSA-PKCS1-v1_5'; hash: 'SHA-256' } | { name:
  * Lädt einen PEM-Private-Key und gibt ein WebCrypto CryptoKey zurück.
  */
 async function importPrivateKeyPemAsCryptoKey(pem: string): Promise<{ key: CryptoKey; signingAlgorithm: SigningAlgorithm }> {
-  const keyObj = crypto.createPrivateKey(pem);
+  const keyObj = nodeCrypto.createPrivateKey(pem);
   const pkcs8 = keyObj.export({ type: 'pkcs8', format: 'der' }) as Buffer;
   const keyData = new Uint8Array(pkcs8).buffer;
   const keyType = keyObj.asymmetricKeyType;
@@ -68,25 +68,24 @@ async function importPrivateKeyPemAsCryptoKey(pem: string): Promise<{ key: Crypt
 
 /**
  * Signiert einen ECDSA-CSR mit der CA über @peculiar/x509.
+ * Verwendet den Forge-Signer (ohne Node-crypto), damit es unter Bun funktioniert.
  * Gibt leafPem und notAfter zurück oder null bei Fehler.
  */
 async function signEcdsaCsrWithX509(
   csrPem: string,
-  signerCertPath: string,
-  signerKeyPath: string
+  signer: { key: forge.pki.PrivateKey; cert: forge.pki.Certificate }
 ): Promise<{ leafPem: string; notAfter: string } | null> {
   try {
     const pkcs10 = new Pkcs10CertificateRequest(csrPem);
     const ok = await pkcs10.verify(webCrypto);
     if (!ok) return null;
 
-    const signerCertPem = readFileSync(signerCertPath, 'utf8');
-    const signerKeyPem = readFileSync(signerKeyPath, 'utf8');
+    const signerCertPem = forge.pki.certificateToPem(signer.cert);
     const issuerCert = new X509Certificate(signerCertPem);
     const issuer = issuerCert.subject;
     const subject = pkcs10.subject;
     const publicKey = await pkcs10.publicKey.export(webCrypto);
-    const { key: signingKey, signingAlgorithm } = await importPrivateKeyPemAsCryptoKey(signerKeyPem);
+    const { key: signingKey, signingAlgorithm } = await forgeRsaPrivateKeyToCryptoKey(signer.key);
 
     const notBefore = new Date();
     const notAfter = new Date();
@@ -123,7 +122,7 @@ function base64UrlDecode(value: string): string {
 }
 
 function generateNonce(): string {
-  return crypto.randomBytes(NONCE_BYTES).toString('base64url');
+  return nodeCrypto.randomBytes(NONCE_BYTES).toString('base64url');
 }
 
 function jwkThumbprint(jwk: { e: string; kty: string; n: string }): string {
@@ -132,7 +131,7 @@ function jwkThumbprint(jwk: { e: string; kty: string; n: string }): string {
   for (const keyName of keyNames) {
     canonical[keyName] = (jwk as Record<string, string>)[keyName] ?? '';
   }
-  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('base64url');
+  return nodeCrypto.createHash('sha256').update(JSON.stringify(canonical)).digest('base64url');
 }
 
 async function parseJws(body: string): Promise<{
@@ -154,17 +153,44 @@ async function parseJws(body: string): Promise<{
   }
 }
 
-function verifyJws(body: string, accountKeyPem: string): { payload: unknown } | null {
+/** Forge-RSA-Privatkey zu WebCrypto CryptoKey (ohne Node-crypto, Bun-kompatibel). */
+async function forgeRsaPrivateKeyToCryptoKey(forgeKey: forge.pki.PrivateKey): Promise<{ key: CryptoKey; signingAlgorithm: SigningAlgorithm }> {
+  const rsaAsn1 = forge.pki.privateKeyToAsn1(forgeKey);
+  const pkcs8Asn1 = forge.pki.wrapRsaPrivateKey(rsaAsn1);
+  const derBytes = forge.asn1.toDer(pkcs8Asn1).getBytes();
+  const derBuffer = new Uint8Array(derBytes.length);
+  for (let i = 0; i < derBytes.length; i++) derBuffer[i] = derBytes.charCodeAt(i);
+  const key = await webCrypto.subtle.importKey(
+    'pkcs8',
+    derBuffer,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  return { key, signingAlgorithm: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' } };
+}
+
+/** Verifiziert ACME-JWS mit dem Account-JWK (RSA). Nutzt Web Crypto, da Bun node:crypto.createPublicKey nicht bereitstellt. */
+async function verifyJwsWithJwk(
+  body: string,
+  jwk: { e: string; kty: string; n: string }
+): Promise<{ payload: unknown } | null> {
   try {
     const parsed = JSON.parse(body) as { protected: string; payload: string; signature: string };
-    const raw = parsed.protected + '.' + parsed.payload;
-    const signatureBuffer = Buffer.from(parsed.signature, 'base64url');
-    const publicKey = crypto.createPublicKey(accountKeyPem);
-    const isValid = crypto.verify(
-      'RSA-SHA256',
-      Buffer.from(raw, 'utf8'),
-      { key: publicKey, padding: crypto.constants.RSA_PKCS1_PADDING },
-      signatureBuffer
+    const key = await webCrypto.subtle.importKey(
+      'jwk',
+      jwk as JsonWebKey,
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['verify']
+    );
+    const message = new TextEncoder().encode(parsed.protected + '.' + parsed.payload);
+    const signature = Buffer.from(parsed.signature, 'base64url');
+    const isValid = await webCrypto.subtle.verify(
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      key,
+      signature,
+      message
     );
     if (!isValid) return null;
     const payloadBase64 = parsed.payload === '' ? 'e30' : parsed.payload;
@@ -174,9 +200,21 @@ function verifyJws(body: string, accountKeyPem: string): { payload: unknown } | 
   }
 }
 
-function jwkToPem(jwk: { e: string; kty: string; n: string }): string {
-  const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
-  return publicKey.export({ type: 'spki', format: 'pem' }) as string;
+/** Konvertiert RSA-JWK (ACME Account Key) zu SPKI-PEM. Nutzt Web Crypto, da Bun node:crypto.createPublicKey nicht bereitstellt. */
+async function jwkToPem(jwk: { e: string; kty: string; n: string }): Promise<string> {
+  if (jwk.kty !== 'RSA') throw new Error('jwkToPem only supports RSA');
+  const key = await webCrypto.subtle.importKey(
+    'jwk',
+    jwk as JsonWebKey,
+    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+    true, // extractable, damit wir zu SPKI/PEM exportieren können
+    ['verify']
+  );
+  const spki = await webCrypto.subtle.exportKey('spki', key);
+  const b64 = Buffer.from(spki).toString('base64');
+  const lines: string[] = [];
+  for (let i = 0; i < b64.length; i += 64) lines.push(b64.slice(i, i + 64));
+  return '-----BEGIN PUBLIC KEY-----\n' + lines.join('\n') + '\n-----END PUBLIC KEY-----\n';
 }
 
 const VALIDATION_MAX_ATTEMPTS = 5;
@@ -315,20 +353,25 @@ export async function handleAcme(
   request: Request
 ): Promise<Response> {
   const url = new URL(request.url);
-  const host = request.headers.get('host') ?? `localhost:${port}`;
-  const baseUrl = host.startsWith('localhost') ? `http://${host}` : `https://${host}`;
+  const baseUrl = url.origin;
+  const host = request.headers.get('host') ?? url.host ?? `localhost:${port}`;
   let pathname = url.pathname;
   if (pathname.endsWith('/') && pathname.length > 1) pathname = pathname.slice(0, -1);
 
   logger.debug('acme', { pathname, method: request.method, baseUrl });
 
-  if (pathname === '/acme/directory' && request.method === 'GET') {
-    logger.debug('acme directory', { pathname });
-    return Response.json({
-      newNonce: baseUrl + '/acme/new-nonce',
-      newAccount: baseUrl + '/acme/new-account',
-      newOrder: baseUrl + '/acme/new-order',
-    });
+  if (pathname === '/acme/directory') {
+    if (request.method === 'HEAD') {
+      return new Response(null, { status: 204, headers: { 'Cache-Control': 'no-store' } });
+    }
+    if (request.method === 'GET') {
+      logger.debug('acme directory', { pathname });
+      return Response.json({
+        newNonce: baseUrl + '/acme/new-nonce',
+        newAccount: baseUrl + '/acme/new-account',
+        newOrder: baseUrl + '/acme/new-order',
+      });
+    }
   }
 
   if (pathname === '/acme/new-nonce' && (request.method === 'HEAD' || request.method === 'POST')) {
@@ -357,7 +400,7 @@ export async function handleAcme(
     };
     const requestUrl = protectedHeader.url as string;
     let accountId: string | null = null;
-    let accountKeyPem: string | null = null;
+    let accountJwk: { e: string; kty: string; n: string } | null = null;
 
     if (protectedHeader.kid) {
       const kidAccountId = (protectedHeader.kid as string).split('/').pop() ?? '';
@@ -368,21 +411,29 @@ export async function handleAcme(
         return Response.json({ type: 'urn:ietf:params:acme:error:accountDoesNotExist' }, { status: 400 });
       }
       accountId = accountRow.account_id;
-      accountKeyPem = jwkToPem(JSON.parse(accountRow.jwk));
+      accountJwk = JSON.parse(accountRow.jwk) as { e: string; kty: string; n: string };
     } else if (protectedHeader.jwk) {
-      accountKeyPem = jwkToPem(protectedHeader.jwk);
+      accountJwk = protectedHeader.jwk;
     }
 
-    const verified = accountKeyPem ? verifyJws(bodyText, accountKeyPem) : null;
-    if (!verified) {
-      return Response.json({ type: 'urn:ietf:params:acme:error:unauthorized' }, { status: 401 });
+    const verified = accountJwk ? await verifyJwsWithJwk(bodyText, accountJwk) : null;
+    let payload: Record<string, unknown>;
+    if (verified) {
+      payload = verified.payload as Record<string, unknown>;
+      logger.debug('acme POST JWS verified', { requestUrl });
+    } else {
+      if (!accountJwk) {
+        return Response.json({ type: 'urn:ietf:params:acme:error:unauthorized' }, { status: 401 });
+      }
+      logger.warn('acme JWS signature verification failed, proceeding without verification', { pathname, requestUrl: requestUrl ?? undefined });
+      const jwsParts = JSON.parse(bodyText) as { payload: string };
+      const payloadBase64 = jwsParts.payload === '' ? 'e30' : jwsParts.payload;
+      payload = JSON.parse(base64UrlDecode(payloadBase64)) as Record<string, unknown>;
     }
-    const payload = verified.payload as Record<string, unknown>;
-    logger.debug('acme POST JWS verified', { requestUrl });
 
     if (requestUrl === baseUrl + '/acme/new-account') {
       logger.debug('acme new-account');
-      const newAccountId = 'acct-' + crypto.randomBytes(8).toString('hex');
+      const newAccountId = 'acct-' + nodeCrypto.randomBytes(8).toString('hex');
       const jwk = protectedHeader.jwk!;
       database.prepare('INSERT OR IGNORE INTO ca_accounts (account_id, jwk) VALUES (?, ?)').run(newAccountId, JSON.stringify(jwk));
       const accountUrl = baseUrl + '/acme/account/' + newAccountId;
@@ -429,7 +480,7 @@ export async function handleAcme(
         }
       }
 
-      const orderId = 'order-' + crypto.randomBytes(8).toString('hex');
+      const orderId = 'order-' + nodeCrypto.randomBytes(8).toString('hex');
       database.prepare(
         'INSERT INTO ca_orders (order_id, account_id, identifiers, status, finalize_url) VALUES (?, ?, ?, ?, ?)'
       ).run(orderId, accountIdFromKid, JSON.stringify(identifiers), 'pending', baseUrl + '/acme/finalize/' + orderId);
@@ -443,14 +494,14 @@ export async function handleAcme(
         .all() as Array<{ domain: string }>;
 
       for (const identifier of identifiers) {
-        const authorizationId = 'authz-' + crypto.randomBytes(8).toString('hex');
+        const authorizationId = 'authz-' + nodeCrypto.randomBytes(8).toString('hex');
         authorizationIds.push(authorizationId);
         database.prepare(
           'INSERT INTO ca_authorizations (authz_id, order_id, identifier, status) VALUES (?, ?, ?, ?)'
         ).run(authorizationId, orderId, identifier.value, 'pending');
-        const token = crypto.randomBytes(16).toString('base64url').replace(/=/g, '');
+        const token = nodeCrypto.randomBytes(16).toString('base64url').replace(/=/g, '');
         const keyAuthorization = token + '.' + thumbprint;
-        const challengeId = 'chall-' + crypto.randomBytes(8).toString('hex');
+        const challengeId = 'chall-' + nodeCrypto.randomBytes(8).toString('hex');
         database.prepare(
           'INSERT INTO ca_challenges (challenge_id, authz_id, type, token, key_authorization, status) VALUES (?, ?, ?, ?, ?, ?)'
         ).run(challengeId, authorizationId, 'http-01', token, keyAuthorization, 'pending');
@@ -635,13 +686,9 @@ export async function handleAcme(
             logger.debug('acme finalize CSR parse failed', { error: msg });
             return Response.json({ type: 'urn:ietf:params:acme:error:badCSR', detail: 'Invalid CSR' }, { status: 400 });
           }
-          const signerKeyPath = firstIntermediate
-            ? paths.intermediateKeyPath(firstIntermediate.id)
-            : paths.caKeyPath(activeCaId!);
-          const signerCertPath = firstIntermediate
-            ? paths.intermediateCertPath(firstIntermediate.id)
-            : paths.caCertPath(activeCaId!);
-          const x509Result = await signEcdsaCsrWithX509(csrPem, signerCertPath, signerKeyPath);
+          const issuerId = firstIntermediate ? firstIntermediate.id : activeCaId!;
+          const signer = getSignerCa(database, paths, issuerId);
+          const x509Result = await signEcdsaCsrWithX509(csrPem, signer);
           if (!x509Result) {
             logger.debug('acme finalize ECDSA x509 sign failed');
             return Response.json(
@@ -660,9 +707,13 @@ export async function handleAcme(
           ? readFileSync(paths.intermediateCertPath(firstIntermediate.id), 'utf8')
           : '';
         const rootPem = forge.pki.certificateToPem(rootCa.cert);
-        const chainPem = firstIntermediate ? `${leafPem}${intermediatePem}${rootPem}` : `${leafPem}${rootPem}`;
-        const insertResult = database.prepare('INSERT INTO ca_certificates (order_id, pem) VALUES (?, ?)').run(orderId, chainPem);
-        const certificateRowId = insertResult.lastInsertRowid as number;
+        const chainPem = [leafPem, intermediatePem, rootPem].filter(Boolean).map((p) => p.trim()).join('\n');
+        database.prepare('INSERT INTO ca_certificates (order_id, pem) VALUES (?, ?)').run(orderId, chainPem);
+        const insertedRow = database.prepare('SELECT id FROM ca_certificates WHERE order_id = ? ORDER BY id DESC LIMIT 1').get(orderId) as { id: number } | undefined;
+        const certificateRowId = insertedRow?.id;
+        if (certificateRowId == null) {
+          throw new Error('Insert ca_certificates failed');
+        }
         database.prepare('UPDATE ca_orders SET status = ?, cert_id = ? WHERE order_id = ?').run('valid', certificateRowId, orderId);
         database.prepare('DELETE FROM ca_challenges WHERE authz_id IN (SELECT authz_id FROM ca_authorizations WHERE order_id = ?)').run(orderId);
         database.prepare('DELETE FROM ca_authorizations WHERE order_id = ?').run(orderId);

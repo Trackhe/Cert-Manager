@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { getValidationStatus } from './acme-validation-state.js';
 import { getActiveAcmeIntermediateId, getActiveCaId } from './ca.js';
 import {
+  CONFIG_KEY_ACME_DIRECTORY_BASE_URL,
   CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE,
   CONFIG_KEY_DEFAULT_COMMON_NAME_ROOT,
   getConfigValue,
@@ -68,6 +69,7 @@ export interface SummaryData {
   activeAcmeIntermediateId: string | null;
   defaultCommonNameRoot: string;
   defaultCommonNameIntermediate: string;
+  acmeDirectoryBaseUrl: string | null;
 }
 
 export function getSummaryData(
@@ -201,6 +203,7 @@ export function getSummaryData(
     getConfigValue(database, CONFIG_KEY_DEFAULT_COMMON_NAME_ROOT) ?? 'Meine CA';
   const defaultCommonNameIntermediate =
     getConfigValue(database, CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE) ?? 'Intermediate CA';
+  const acmeDirectoryBaseUrl = getConfigValue(database, CONFIG_KEY_ACME_DIRECTORY_BASE_URL) ?? null;
 
   return {
     summary: {
@@ -224,5 +227,6 @@ export function getSummaryData(
     activeAcmeIntermediateId,
     defaultCommonNameRoot,
     defaultCommonNameIntermediate,
+    acmeDirectoryBaseUrl,
   };
 }

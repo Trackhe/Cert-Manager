@@ -18,6 +18,14 @@ export function createPathHelpers(dataDir: string) {
     leafKeyPath(certificateId: number): string {
       return `${dataDir}/leaf-${certificateId}-key.pem`;
     },
+    /** Zertifikat für den optionalen HTTPS-Server (Port+1). */
+    serverHttpsCertPath(): string {
+      return `${dataDir}/server-https-cert.pem`;
+    },
+    /** Schlüssel für den optionalen HTTPS-Server (Port+1). */
+    serverHttpsKeyPath(): string {
+      return `${dataDir}/server-https-key.pem`;
+    },
   };
 }
 
