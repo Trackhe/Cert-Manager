@@ -121,6 +121,20 @@ function base64UrlDecode(value: string): string {
   return Buffer.from(value, 'base64url').toString('utf8');
 }
 
+/**
+ * Stellt sicher, dass zwischen jedem -----END CERTIFICATE----- und -----BEGIN CERTIFICATE-----
+ * genau ein Zeilenumbruch steht und die Kette mit einem Zeilenumbruch endet (RFC 7468 / HAProxy-kompatibel).
+ * Behebt Fälle, in denen Bibliotheken oder Uploads keine Newline zwischen Blöcken liefern.
+ */
+function normalizePemChain(pem: string): string {
+  const normalized = pem
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/(-----END CERTIFICATE-----)\s*(-----BEGIN CERTIFICATE-----)/g, '$1\n$2')
+    .trim();
+  return normalized.endsWith('\n') ? normalized : normalized + '\n';
+}
+
 function generateNonce(): string {
   return nodeCrypto.randomBytes(NONCE_BYTES).toString('base64url');
 }
@@ -707,7 +721,9 @@ export async function handleAcme(
           ? readFileSync(paths.intermediateCertPath(firstIntermediate.id), 'utf8')
           : '';
         const rootPem = forge.pki.certificateToPem(rootCa.cert);
-        const chainPem = [leafPem, intermediatePem, rootPem].filter(Boolean).map((p) => p.trim()).join('\n');
+        const chainPem = normalizePemChain(
+          [leafPem, intermediatePem, rootPem].filter(Boolean).map((p) => p.trim()).join('\n')
+        );
         database.prepare('INSERT INTO ca_certificates (order_id, pem) VALUES (?, ?)').run(orderId, chainPem);
         const insertedRow = database.prepare('SELECT id FROM ca_certificates WHERE order_id = ? ORDER BY id DESC LIMIT 1').get(orderId) as { id: number } | undefined;
         const certificateRowId = insertedRow?.id;
@@ -791,7 +807,7 @@ export async function handleAcme(
         return Response.json({ type: 'urn:ietf:params:acme:error:malformed' }, { status: 404 });
       }
       const linkUp = `<${baseUrl}/acme/ca>; rel="up"`;
-      return new Response(certificateRow.pem, {
+      return new Response(normalizePemChain(certificateRow.pem), {
         headers: {
           'Content-Type': 'application/pem-certificate-chain',
           Link: linkUp,
@@ -884,7 +900,7 @@ export async function handleAcme(
       return Response.json({ type: 'urn:ietf:params:acme:error:malformed' }, { status: 404 });
     }
     const linkUp = `<${baseUrl}/acme/ca>; rel="up"`;
-    return new Response(certificateRow.pem, {
+    return new Response(normalizePemChain(certificateRow.pem), {
       headers: {
         'Content-Type': 'application/pem-certificate-chain',
         Link: linkUp,
