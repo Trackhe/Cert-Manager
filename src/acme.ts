@@ -6,6 +6,7 @@ import {
   KeyUsageFlags,
   KeyUsagesExtension,
   Pkcs10CertificateRequest,
+  SubjectAlternativeNameExtension,
   X509Certificate,
   X509CertificateGenerator,
 } from '@peculiar/x509';
@@ -73,7 +74,8 @@ async function importPrivateKeyPemAsCryptoKey(pem: string): Promise<{ key: Crypt
  */
 async function signEcdsaCsrWithX509(
   csrPem: string,
-  signer: { key: forge.pki.PrivateKey; cert: forge.pki.Certificate }
+  signer: { key: forge.pki.PrivateKey; cert: forge.pki.Certificate },
+  sanDomains: string[]
 ): Promise<{ leafPem: string; notAfter: string } | null> {
   try {
     const pkcs10 = new Pkcs10CertificateRequest(csrPem);
@@ -91,6 +93,14 @@ async function signEcdsaCsrWithX509(
     const notAfter = new Date();
     notAfter.setFullYear(notAfter.getFullYear() + 1);
 
+    const extensions = [
+      new BasicConstraintsExtension(false, undefined, true),
+      new KeyUsagesExtension(KeyUsageFlags.digitalSignature | KeyUsageFlags.keyAgreement, true),
+      ...(sanDomains.length > 0
+        ? [new SubjectAlternativeNameExtension(sanDomains.map((d) => ({ type: 'dns' as const, value: d })), false)]
+        : []),
+    ];
+
     const cert = await X509CertificateGenerator.create(
       {
         serialNumber: BigInt(Date.now()).toString(16),
@@ -101,10 +111,7 @@ async function signEcdsaCsrWithX509(
         publicKey,
         signingKey,
         signingAlgorithm,
-        extensions: [
-          new BasicConstraintsExtension(false, undefined, true),
-          new KeyUsagesExtension(KeyUsageFlags.digitalSignature | KeyUsageFlags.keyAgreement, true),
-        ],
+        extensions,
       },
       webCrypto
     );
@@ -673,6 +680,8 @@ export async function handleAcme(
         let leafPem: string;
         let notAfter: string;
 
+        const sanDomains = [...new Set(identifiers.filter((id) => id.type === 'dns').map((id) => id.value).filter(Boolean))];
+
         try {
           const csr = forge.pki.certificationRequestFromPem(csrPem);
           if (!csr.verify()) {
@@ -689,8 +698,13 @@ export async function handleAcme(
             ? getSignerCa(database, paths, firstIntermediate.id)
             : rootCa;
           certificate.setIssuer(signer.cert.subject.attributes);
-          // Basic Constraints: CA=false, kein pathLenConstraint (Certbot/RFC verlangt path_length=None bei End-Entity)
-          certificate.setExtensions([{ name: 'basicConstraints', cA: false, critical: true }]);
+          const extensions: forge.pki.CertificateExtension[] = [
+            { name: 'basicConstraints', cA: false, critical: true },
+            { name: 'keyUsage', digitalSignature: true, keyEncipherment: true, critical: true },
+            { name: 'extKeyUsage', serverAuth: true, clientAuth: true },
+            ...(sanDomains.length > 0 ? [{ name: 'subjectAltName' as const, altNames: sanDomains.map((d) => ({ type: 2, value: d })) }] : []),
+          ];
+          certificate.setExtensions(extensions);
           certificate.sign(signer.key, forge.md.sha256.create());
           leafPem = forge.pki.certificateToPem(certificate);
           notAfter = certificate.validity.notAfter.toISOString();
@@ -702,7 +716,7 @@ export async function handleAcme(
           }
           const issuerId = firstIntermediate ? firstIntermediate.id : activeCaId!;
           const signer = getSignerCa(database, paths, issuerId);
-          const x509Result = await signEcdsaCsrWithX509(csrPem, signer);
+          const x509Result = await signEcdsaCsrWithX509(csrPem, signer, sanDomains);
           if (!x509Result) {
             logger.debug('acme finalize ECDSA x509 sign failed');
             return Response.json(
