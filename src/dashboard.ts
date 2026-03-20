@@ -176,8 +176,8 @@ function renderCertTree(
 }
 
 export function renderDashboard(database: Database, paths: PathHelpers): Response {
-  const { summary, challenges, acmeChallenges, acmeValidationStatus, acmeWhitelistDomains, acmeCaDomainAssignments, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate, certificates, cas, intermediates, acmeDirectoryBaseUrl } = getSummaryData(database, paths);
-  const initialData = { cas, intermediates, certificates, caConfigured: summary.caConfigured, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate, acmeDirectoryBaseUrl };
+  const { summary, challenges, acmeChallenges, acmeValidationStatus, acmeWhitelistDomains, acmeCaDomainAssignments, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate, certificates, cas, intermediates, acmeDirectoryBaseUrl, acmeCertValidityDays } = getSummaryData(database, paths);
+  const initialData = { cas, intermediates, certificates, caConfigured: summary.caConfigured, activeAcmeIntermediateId, defaultCommonNameRoot, defaultCommonNameIntermediate, acmeDirectoryBaseUrl, acmeCertValidityDays };
   const getCaDisplayName = (caId: string): string => {
     const root = cas.find((c) => c.id === caId);
     if (root) return root.name + (root.commonName !== root.name ? ' (' + root.commonName + ')' : '');
@@ -637,6 +637,11 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
             <select id="acmeDirectoryFromCertSelect" style="max-width:220px" title="Basis-URL aus Zertifikat übernehmen">
               <option value="">Aus Zertifikat übernehmen …</option>
             </select>
+          </div>
+          <p style="margin:12px 0 6px;font-size:13px;color:var(--gh-fg-muted)">Gültigkeit neu ausgestellter ACME-Zertifikate (Tage, 1–825):</p>
+          <div class="directory-url-wrap" style="flex-wrap:wrap;align-items:center">
+            <input type="number" id="acmeCertValidityDaysInput" min="1" max="825" value="${acmeCertValidityDays}" style="width:80px;padding:8px;box-sizing:border-box">
+            <button type="button" class="btn btn-secondary" id="saveAcmeCertValidityBtn">Übernehmen</button>
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
             <button type="button" class="btn" id="createDirectoryCertBtn">Zertifikat für HTTPS erstellen</button>
@@ -1428,6 +1433,22 @@ export function renderDashboard(database: Database, paths: PathHelpers): Respons
     if (copyBtn) copyBtn.addEventListener('click', copyDirectoryUrl);
     var saveDirUrlBtn = document.getElementById('saveDirectoryUrlBtn');
     if (saveDirUrlBtn) saveDirUrlBtn.addEventListener('click', saveDirectoryUrl);
+    var saveAcmeValidityBtn = document.getElementById('saveAcmeCertValidityBtn');
+    if (saveAcmeValidityBtn) saveAcmeValidityBtn.addEventListener('click', function() {
+      var input = document.getElementById('acmeCertValidityDaysInput');
+      var val = input && input.value !== '' ? parseInt(input.value, 10) : NaN;
+      if (Number.isNaN(val) || val < 1 || val > 825) {
+        showError('Gültigkeit muss zwischen 1 und 825 Tagen liegen.');
+        return;
+      }
+      fetch('/api/acme-cert-validity-days', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ validityDays: val }) })
+        .then(function(r) { return r.json().then(function(d) { if (!r.ok) throw new Error(d && d.error ? d.error : 'Fehler'); return d; }); })
+        .then(function() {
+          initialData.acmeCertValidityDays = val;
+          showError(null);
+        })
+        .catch(function(e) { showError(e && e.message ? e.message : 'Speichern fehlgeschlagen'); });
+    });
     var fromCertSelect = document.getElementById('acmeDirectoryFromCertSelect');
     if (fromCertSelect) fromCertSelect.addEventListener('change', function() {
       var val = this.value;

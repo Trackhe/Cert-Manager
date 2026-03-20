@@ -5,6 +5,7 @@ import type { PathHelpers } from './paths.js';
 export const CONFIG_KEY_ACTIVE_CA_ID = 'active_ca_id';
 export const CONFIG_KEY_ACTIVE_ACME_INTERMEDIATE_ID = 'active_acme_intermediate_id';
 export const CONFIG_KEY_ACME_DIRECTORY_BASE_URL = 'acme_directory_base_url';
+export const CONFIG_KEY_ACME_CERT_VALIDITY_DAYS = 'acme_cert_validity_days';
 export const CONFIG_KEY_DEFAULT_COMMON_NAME_ROOT = 'default_common_name_root';
 export const CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE = 'default_common_name_intermediate';
 export const CONFIG_KEY_DEFAULT_KEY_SIZE = 'default_key_size';
@@ -19,6 +20,7 @@ const CONFIG_FALLBACKS: Record<string, string> = {
   [CONFIG_KEY_DEFAULT_VALIDITY_YEARS]: '10',
   [CONFIG_KEY_DEFAULT_VALIDITY_DAYS]: '365',
   [CONFIG_KEY_DEFAULT_HASH_ALGORITHM]: 'sha256',
+  [CONFIG_KEY_ACME_CERT_VALIDITY_DAYS]: '365',
 };
 
 const SCHEMA_STATEMENTS = [

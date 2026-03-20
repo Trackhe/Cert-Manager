@@ -19,6 +19,7 @@ import {
 } from './ca.js';
 import { createLeafCertificate } from './leaf-certificate.js';
 import {
+  CONFIG_KEY_ACME_CERT_VALIDITY_DAYS,
   CONFIG_KEY_ACME_DIRECTORY_BASE_URL,
   CONFIG_KEY_ACTIVE_ACME_INTERMEDIATE_ID,
   CONFIG_KEY_ACTIVE_CA_ID,
@@ -1292,6 +1293,28 @@ async function handleAcmeDirectoryUrlPost(context: ApiContext): Promise<Response
   }
 }
 
+async function handleAcmeCertValidityDaysPost(context: ApiContext): Promise<Response> {
+  const { database, request } = context;
+  try {
+    const body = (await request.json()) as { validityDays?: number };
+    const raw = body.validityDays;
+    const validityDays = typeof raw === 'number' ? Math.round(raw) : parseInt(String(raw ?? ''), 10);
+    if (Number.isNaN(validityDays) || validityDays < 1 || validityDays > 825) {
+      return Response.json(
+        { error: 'Gültigkeit muss zwischen 1 und 825 Tagen liegen.' },
+        { status: 400 }
+      );
+    }
+    database
+      .prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)')
+      .run(CONFIG_KEY_ACME_CERT_VALIDITY_DAYS, String(validityDays));
+    logger.info('ACME-Zertifikat-Gültigkeit gesetzt', { validityDays });
+    return Response.json({ ok: true, validityDays });
+  } catch {
+    return Response.json({ error: 'Ungültige Anfrage' }, { status: 400 });
+  }
+}
+
 async function handleAcmeCreateDirectoryCert(context: ApiContext): Promise<Response> {
   const { database, paths, request } = context;
   try {
@@ -1400,6 +1423,7 @@ const API_ROUTES: Array<{
   { method: 'GET', path: '/api/acme-default-intermediate', handler: handleAcmeDefaultIntermediateGet },
   { method: 'POST', path: '/api/acme-default-intermediate', handler: handleAcmeDefaultIntermediatePost },
   { method: 'POST', path: '/api/acme-directory-url', handler: handleAcmeDirectoryUrlPost },
+  { method: 'POST', path: '/api/acme-cert-validity-days', handler: handleAcmeCertValidityDaysPost },
   { method: 'POST', path: '/api/acme/create-directory-cert', handler: handleAcmeCreateDirectoryCert },
 ];
 

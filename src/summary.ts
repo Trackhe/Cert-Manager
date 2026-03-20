@@ -3,10 +3,12 @@ import { existsSync } from 'node:fs';
 import { getValidationStatus } from './acme-validation-state.js';
 import { getActiveAcmeIntermediateId, getActiveCaId } from './ca.js';
 import {
+  CONFIG_KEY_ACME_CERT_VALIDITY_DAYS,
   CONFIG_KEY_ACME_DIRECTORY_BASE_URL,
   CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE,
   CONFIG_KEY_DEFAULT_COMMON_NAME_ROOT,
   getConfigValue,
+  getConfigInt,
 } from './database.js';
 import type { PathHelpers } from './paths.js';
 
@@ -70,6 +72,7 @@ export interface SummaryData {
   defaultCommonNameRoot: string;
   defaultCommonNameIntermediate: string;
   acmeDirectoryBaseUrl: string | null;
+  acmeCertValidityDays: number;
 }
 
 export function getSummaryData(
@@ -204,6 +207,7 @@ export function getSummaryData(
   const defaultCommonNameIntermediate =
     getConfigValue(database, CONFIG_KEY_DEFAULT_COMMON_NAME_INTERMEDIATE) ?? 'Intermediate CA';
   const acmeDirectoryBaseUrl = getConfigValue(database, CONFIG_KEY_ACME_DIRECTORY_BASE_URL) ?? null;
+  const acmeCertValidityDays = Math.max(1, Math.min(825, getConfigInt(database, CONFIG_KEY_ACME_CERT_VALIDITY_DAYS)));
 
   return {
     summary: {
@@ -228,5 +232,6 @@ export function getSummaryData(
     defaultCommonNameRoot,
     defaultCommonNameIntermediate,
     acmeDirectoryBaseUrl,
+    acmeCertValidityDays,
   };
 }

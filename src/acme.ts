@@ -21,6 +21,7 @@ import {
   updateValidationAttempt,
 } from './acme-validation-state.js';
 import { getActiveAcmeIntermediateId, getActiveCaId, getCa, getCaIdForAcmeDomain, getSignerCa } from './ca.js';
+import { CONFIG_KEY_ACME_CERT_VALIDITY_DAYS, getConfigInt } from './database.js';
 import { logger } from './logger.js';
 import type { PathHelpers } from './paths.js';
 import { matchesWildcardDomain, hasStringProperties } from './utils.js';
@@ -75,7 +76,8 @@ async function importPrivateKeyPemAsCryptoKey(pem: string): Promise<{ key: Crypt
 async function signEcdsaCsrWithX509(
   csrPem: string,
   signer: { key: forge.pki.PrivateKey; cert: forge.pki.Certificate },
-  sanDomains: string[]
+  sanDomains: string[],
+  validityDays: number
 ): Promise<{ leafPem: string; notAfter: string } | null> {
   try {
     const pkcs10 = new Pkcs10CertificateRequest(csrPem);
@@ -91,7 +93,7 @@ async function signEcdsaCsrWithX509(
 
     const notBefore = new Date();
     const notAfter = new Date();
-    notAfter.setFullYear(notAfter.getFullYear() + 1);
+    notAfter.setDate(notAfter.getDate() + validityDays);
 
     const extensions = [
       new BasicConstraintsExtension(false, undefined, true),
@@ -681,6 +683,7 @@ export async function handleAcme(
         let notAfter: string;
 
         const sanDomains = [...new Set(identifiers.filter((id) => id.type === 'dns').map((id) => id.value).filter(Boolean))];
+        const acmeValidityDays = Math.max(1, Math.min(825, getConfigInt(database, CONFIG_KEY_ACME_CERT_VALIDITY_DAYS)));
 
         try {
           const csr = forge.pki.certificationRequestFromPem(csrPem);
@@ -692,7 +695,7 @@ export async function handleAcme(
           certificate.serialNumber = String(Date.now());
           certificate.validity.notBefore = new Date();
           certificate.validity.notAfter = new Date();
-          certificate.validity.notAfter.setFullYear(certificate.validity.notAfter.getFullYear() + 1);
+          certificate.validity.notAfter.setDate(certificate.validity.notAfter.getDate() + acmeValidityDays);
           certificate.setSubject(csr.subject.attributes);
           const signer = firstIntermediate
             ? getSignerCa(database, paths, firstIntermediate.id)
@@ -716,7 +719,7 @@ export async function handleAcme(
           }
           const issuerId = firstIntermediate ? firstIntermediate.id : activeCaId!;
           const signer = getSignerCa(database, paths, issuerId);
-          const x509Result = await signEcdsaCsrWithX509(csrPem, signer, sanDomains);
+          const x509Result = await signEcdsaCsrWithX509(csrPem, signer, sanDomains, acmeValidityDays);
           if (!x509Result) {
             logger.debug('acme finalize ECDSA x509 sign failed');
             return Response.json(
